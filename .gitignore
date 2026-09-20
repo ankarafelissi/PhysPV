@@ -1,0 +1,75 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# Test and coverage output
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Virtual environments and local environment variables
+.venv/
+venv/
+env/
+ENV/
+.conda/
+.env
+.env.*
+!.env.example
+
+# Build and packaging output
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Editors and operating-system files
+.vscode/
+.idea/
+*.code-workspace
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Jupyter temporary files
+.ipynb_checkpoints/
+
+# Large HDF5 datasets and generated model/result files
+*.h5
+# Raw inputs stay local; only documentation and the tiny example are tracked.
+data/raw/*
+!data/raw/README.md
+!data/raw/.gitkeep
+!data/raw/SOLETE_short.h5
+
+# Other generated machine-learning artifacts
+*.keras
+*.ckpt
+*.joblib
+*.pkl
+checkpoints/
+logs/
+outputs/*
+!outputs/models/
+!outputs/figures/
+!outputs/results/
+outputs/models/*
+outputs/figures/*
+outputs/results/*
+!outputs/**/.gitkeep
+/results/
+data/processed/*
+!data/processed/.gitkeep
+
+# Temporary files and logs
+*.log
+*.tmp
+*.temp
+*.bak
+~$*

@@ -1,0 +1,6 @@
+# Normalize text to LF everywhere. This is not cosmetic: src/provenance.py hashes the
+# raw bytes of src/**/*.py into every run's recorded environment, and src/predict.py
+# compares that hash strictly. Without an explicit eol, Git for Windows' core.autocrlf=true
+# rewrites *.py to CRLF on checkout, silently invalidating trained artifacts.
+* text=auto eol=lf
+*.h5 binary

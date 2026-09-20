@@ -1,0 +1,10 @@
+# Shared execution-only overrides for individual and study smoke runs.
+data:
+  max_rows: 240
+  pre: 2
+  horizon: 1
+models:
+  CNN_LSTM:
+    epochs: 1
+  XGBoost:
+    n_estimators: 5

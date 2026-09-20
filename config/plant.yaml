@@ -1,0 +1,22 @@
+# Reference installation parameters retained from the supplied dataset metadata.
+# AC rating is deliberately unset: do not use DC nameplate or curve endpoints.
+reference_irradiance_w_m2: 1000.0
+reference_temperature_c: 25.0
+ac_capacity_kw: null
+efficiency_input_w: [0, 250, 400, 450, 500, 600, 650, 750, 825, 1000, 1200, 1600, 2000, 3000, 4000, 6000, 8000, 10000]
+efficiency_fraction: [0, 0.855, 0.902, 0.909, 0.918, 0.92, 0.923, 0.94, 0.944, 0.948, 0.956, 0.96, 0.973, 0.977, 0.98, 0.981, 0.9805, 0.98]
+arrays:
+  - module_power_w: 165.0
+    modules_series: 18
+    strings_parallel: 2
+    temperature_coefficient_per_c: -0.00478
+    module_a: -3.56
+    module_b: -0.075
+    cell_delta_c: 3.0
+  - module_power_w: 125.0
+    modules_series: 6
+    strings_parallel: 2
+    temperature_coefficient_per_c: -0.0045
+    module_a: -3.56
+    module_b: -0.075
+    cell_delta_c: 3.0

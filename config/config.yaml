@@ -1,0 +1,74 @@
+# Common measured/calendar features only; physics columns are injected by code.
+seed: 32
+data:
+  path: data/raw/SOLETE_short.h5
+  resolution: 60min
+  processed_path: data/processed/solete_features.h5
+  target: P_Solar[kW]
+  features:
+  - TEMPERATURE[degC]
+  - HUMIDITY[%]
+  - WIND_SPEED[m1s]
+  - GHI[kW1m2]
+  - POA Irr[kW1m2]
+  - P_Solar[kW]
+  - HoursOfDay
+  correct_power: false
+  pre: 2
+  horizon: 1
+  split:
+  - 0.7
+  - 0.2
+  - 0.1
+  scaler: MinMax01
+  physics: false
+  p_nom_kw: 7.44
+  plant_path: config/plant.yaml
+  constraints:
+    nonnegative: true
+    capacity: false
+model: CNN_LSTM
+models:
+  CNN_LSTM:
+    epochs: 30
+    batch_size: 16
+    filters: 32
+    kernel_size: 3
+    pool_size: null
+    neurons:
+    - 32
+    cnn_activation: tanh
+    lstm_activation: tanh
+    output_activation: linear
+    loss: mean_absolute_error
+    optimizer: adam
+    patience: 5
+  XGBoost:
+    n_estimators: 300
+    max_depth: 3
+    learning_rate: 0.05
+    subsample: 0.9
+    colsample_bytree: 0.9
+    objective: reg:squarederror
+    tree_method: hist
+    n_jobs: 2
+    early_stopping_rounds: 20
+output_dir: outputs
+study:
+  min_bootstrap_blocks: 10
+  seeds:
+  - 11
+  - 23
+  - 32
+  - 47
+  - 59
+  bootstrap_resamples: 2000
+  bootstrap_seed: 2026
+  bootstrap_block_length: 24
+  min_test_origins: 500
+  min_stratum_origins: 30
+  fallback_split:
+  - 0.5
+  - 0.2
+  - 0.3
+  representative_origins: 48
