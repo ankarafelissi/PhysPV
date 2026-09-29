@@ -6,7 +6,9 @@ import numpy as np
 
 
 class XGBoostForecaster:
-    def __init__(self, params=None, seed=32):
+    """Train one XGBoost regressor for each forecast horizon."""
+
+    def __init__(self, params=None, seed=11):
         self.params = dict(params or {})
         self.params.setdefault('random_state', seed)
         self.estimators = []
@@ -19,6 +21,7 @@ class XGBoostForecaster:
         return x.reshape(len(x), -1)
 
     def fit(self, x, y, x_val, y_val):
+        """Fit every horizon on the same flattened history and validation split."""
         from xgboost import XGBRegressor
         x, x_val = self.flatten(x), self.flatten(x_val)
         if len(x) != len(y) or len(x_val) != len(y_val) or x.shape[1] != x_val.shape[1]:
@@ -33,9 +36,11 @@ class XGBoostForecaster:
         return self
 
     def predict(self, x):
+        """Return an (origins, horizons) prediction matrix."""
         if not self.estimators:
             raise ValueError('Fit or load the model before prediction.')
-        return np.column_stack([model.predict(self.flatten(x)) for model in self.estimators])
+        flat = self.flatten(x)
+        return np.column_stack([model.predict(flat) for model in self.estimators])
 
     def save(self, directory):
         directory = Path(directory)

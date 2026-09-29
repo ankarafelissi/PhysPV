@@ -1,5 +1,29 @@
 """CNN-LSTM training and TensorFlow SavedModel persistence."""
 
+
+def build_optimizer(spec):
+    """Build a serializable optimizer specification from YAML."""
+    import tensorflow as tf
+    if isinstance(spec, str):
+        return tf.keras.optimizers.get(spec)
+    if not isinstance(spec, dict) or set(spec) - {'name', 'learning_rate', 'clipnorm'}:
+        raise ValueError('optimizer must be a name or a mapping with name, learning_rate and optional clipnorm.')
+    name = spec.get('name')
+    if not isinstance(name, str) or not name:
+        raise ValueError('optimizer.name must be a nonempty string.')
+    kwargs = {}
+    for key in ('learning_rate', 'clipnorm'):
+        if key in spec:
+            value = spec[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+                raise ValueError(f'optimizer.{key} must be positive.')
+            kwargs[key] = float(value)
+    optimizer = tf.keras.optimizers.get(name)
+    config = optimizer.get_config()
+    config.update(kwargs)
+    return optimizer.__class__.from_config(config)
+
+
 def build_model(params, input_shape, horizon):
     """Use an unconstrained forecast head so negative scores retain gradients."""
     import tensorflow as tf
@@ -18,39 +42,29 @@ def build_model(params, input_shape, horizon):
     for i, units in enumerate(neurons):
         model.add(layers.LSTM(units, activation=params['lstm_activation'], return_sequences=i < len(neurons)-1))
     model.add(layers.Dense(horizon, activation='linear'))
-    model.compile(optimizer=params['optimizer'], loss=params['loss'])
+    model.compile(optimizer=build_optimizer(params['optimizer']), loss=params['loss'])
     return model
 
 
 def train(params, splits, seed):
+    """Fit once in chronological order and restore the best validation checkpoint."""
     train, val = splits['TRAIN'], splits['VAL']
-    import numpy as np
     import tensorflow as tf
     tf.keras.backend.clear_session()
     tf.keras.utils.set_random_seed(seed)
     model = build_model(params, train['X'].shape[1:], train['Y_scaled'].shape[1])
-
-    class HorizonDiagnostics(tf.keras.callbacks.Callback):
-        """Record each validation horizon without using TEST or changing selection."""
-        def on_epoch_end(self, epoch, logs=None):
-            predicted = self.model.predict(val['X'], verbose=0)
-            if not np.isfinite(predicted).all():
-                raise ValueError('CNN-LSTM produced non-finite validation forecasts.')
-            for h in range(predicted.shape[1]):
-                values = predicted[:, h]
-                logs[f'val_mae_scaled_h{h+1}'] = float(np.mean(abs(values-val['Y_scaled'][:, h])))
-                logs[f'val_prediction_span_scaled_h{h+1}'] = float(np.ptp(values))
-                logs[f'val_zero_fraction_scaled_h{h+1}'] = float(np.mean(values == 0))
-
+    early_stopping = tf.keras.callbacks.EarlyStopping(
+        monitor='val_loss', patience=params['patience'], restore_best_weights=True)
     history = model.fit(train['X'], train['Y_scaled'], validation_data=(val['X'], val['Y_scaled']),
-                        epochs=params['epochs'], batch_size=params['batch_size'], shuffle=False, verbose=2,
-                        callbacks=[HorizonDiagnostics(), tf.keras.callbacks.EarlyStopping(
-                            monitor='val_loss', patience=params['patience'], restore_best_weights=True)])
+                        epochs=params['epochs'], batch_size=params['batch_size'], shuffle=False,
+                        verbose=params.get('verbose', 2),
+                        callbacks=[early_stopping])
     return model, history.history
 
 
 def save(model, directory):
     model.save(str(directory / "cnn_lstm"), save_format="tf")
+
 
 def load(directory):
     from tensorflow.keras.models import load_model
