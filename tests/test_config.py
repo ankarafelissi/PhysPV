@@ -13,7 +13,7 @@ from src.paths import PROJECT_ROOT, project_path
 
 class ConfigurationTests(unittest.TestCase):
     def test_smoke_overrides_preserve_source_and_physics_contract(self):
-        config = load_config('config/full.yaml')
+        config = load_config('config/config.yaml')
         original = copy.deepcopy(config)
         smoke = smoke_config(config)
         self.assertEqual(config, original)
@@ -34,10 +34,10 @@ class ConfigurationTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
-    def test_invalid_seed_types_raise_contract_error(self):
-        study = load_config('config/full.yaml')['study']
-        study['seeds'] = [1, 2, 3, 4, []]
-        with self.assertRaisesRegex(ValueError, 'five'):
+    def test_invalid_study_settings_raise_contract_error(self):
+        study = load_config('config/config.yaml')['study']
+        study['bootstrap_resamples'] = 99
+        with self.assertRaisesRegex(ValueError, '1000'):
             validate_study(study)
         with self.assertRaisesRegex(ValueError, 'mapping'):
             validate_study(None)

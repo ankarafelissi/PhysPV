@@ -5,7 +5,7 @@ from src.runtime import configure_runtime
 configure_runtime()
 import numpy as np
 from src.config import load_config, validate_config
-from src.diagnostics import forecast_health, require_healthy_forecasts
+from src.metrics import forecast_health, require_healthy_forecasts
 
 
 class ForecastHealthTests(unittest.TestCase):
@@ -33,7 +33,7 @@ class ForecastHealthTests(unittest.TestCase):
             forecast_health(np.ones((2, 1)), np.array([[1.], [np.nan]]))
 
     def test_relu_config_is_rejected(self):
-        config = load_config('config/full.yaml')
+        config = load_config('config/config.yaml')
         config['models']['CNN_LSTM']['output_activation'] = 'relu'
         with self.assertRaisesRegex(ValueError, 'linear'):
             validate_config(config)
@@ -43,7 +43,7 @@ class ForecastHealthTests(unittest.TestCase):
         import tables
         import tensorflow as tf
         from src.models.cnn_lstm import build_model
-        params = load_config('config/full.yaml')['models']['CNN_LSTM']
+        params = load_config('config/config.yaml')['models']['CNN_LSTM']
         tf.keras.backend.clear_session()
         model = build_model(params, (3, 2), 2)
         head = model.layers[-1]

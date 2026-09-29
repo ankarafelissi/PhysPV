@@ -72,6 +72,7 @@ class PipelineTests(unittest.TestCase):
                              index=pd.date_range('2020', periods=2, freq='h'))
         original = frame.copy(deep=True)
         config = load_config('config/config.yaml')['data']
+        config.pop('candidate_subset')
         config.update(features=['P_Solar[kW]'], physics=True)
         result = build_features(frame, config)
         pd.testing.assert_frame_equal(frame, original)

@@ -8,17 +8,17 @@ import numpy as np
 import pandas as pd
 
 from src.config import data_contract, load_config, validate_config
-from src.constraints import constrain_power
 from src.data import prepare_data
 from src.features import PHYSICS_FEATURES, build_features, feature_names, pv_power_features
-from src.metrics import evaluate, paired_bootstrap
-from src.scenarios import fit_thresholds, scenario_labels
+from src.metrics import (constrain_power, evaluate, fit_scenario_thresholds,
+                         paired_bootstrap, scenario_labels)
 
 
 class PhysicsTests(unittest.TestCase):
     def setUp(self):
         self.config = load_config('config/config.yaml')
         self.data = self.config['data']
+        self.data.pop('candidate_subset')
         n = 120
         self.frame = pd.DataFrame({
             'POA Irr[kW1m2]': np.linspace(0, 1, n),
@@ -81,8 +81,8 @@ class PhysicsTests(unittest.TestCase):
         changed.iloc[108:] *= 10
         original_parts, _ = prepare_data(before, self.data)
         new_parts, _ = prepare_data(build_features(changed, self.data), self.data)
-        thresholds = fit_thresholds(original_parts['TRAIN'])
-        self.assertEqual(thresholds, fit_thresholds(new_parts['TRAIN']))
+        thresholds = fit_scenario_thresholds(original_parts['TRAIN'])
+        self.assertEqual(thresholds, fit_scenario_thresholds(new_parts['TRAIN']))
         labels = scenario_labels(original_parts['TEST'], thresholds)
         self.assertEqual(labels['ramp_class'].shape, original_parts['TEST']['Y'].shape)
 

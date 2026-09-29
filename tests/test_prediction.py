@@ -15,9 +15,9 @@ import yaml
 from src.config import data_contract, load_config
 from src.data import load_data, prepare_data
 from src.features import build_features
+from src.metrics import fit_scenario_thresholds
 from src.predict import run
 from src.provenance import input_identity, partition_metadata, environment_metadata
-from src.scenarios import fit_thresholds
 
 
 class PredictionTests(unittest.TestCase):
@@ -33,7 +33,7 @@ class PredictionTests(unittest.TestCase):
         (self.root / 'metadata.json').write_text(json.dumps({
             'model': 'XGBoost', 'data_contract': data_contract(self.config['data']),
             'input': input_identity(self.config['data']), 'partitions': partition_metadata(self.splits),
-            'scenario_thresholds': fit_thresholds(self.splits['TRAIN']),
+            'scenario_thresholds': fit_scenario_thresholds(self.splits['TRAIN']),
             'run_id': 'fixture', 'seed': self.config['seed'],
             'environment': environment_metadata(), 'smoke': True}), encoding='utf-8')
         joblib.dump(scalers, self.root / 'scalers.joblib')
