@@ -39,6 +39,16 @@ def validate_config(config):
         raise ValueError('model must be CNN_LSTM or XGBoost.')
     if config['models'].get('CNN_LSTM', {}).get('output_activation') not in (None, 'linear'):
         raise ValueError('CNN-LSTM requires a linear output; configure physical bounds in data.constraints.')
+    optimizer = config['models'].get('CNN_LSTM', {}).get('optimizer')
+    if not isinstance(optimizer, (str, dict)):
+        raise ValueError('CNN-LSTM optimizer must be a name or parameter mapping.')
+    if isinstance(optimizer, dict):
+        if set(optimizer) - {'name', 'learning_rate', 'clipnorm'} or not isinstance(optimizer.get('name'), str):
+            raise ValueError('CNN-LSTM optimizer mapping supports name, learning_rate and clipnorm.')
+        for key in ('learning_rate', 'clipnorm'):
+            value = optimizer.get(key)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0):
+                raise ValueError(f'CNN-LSTM optimizer.{key} must be positive.')
     return config
 
 
@@ -54,10 +64,21 @@ def load_config(path):
     return validate_config(config)
 
 
+def arm_config(config, subset, model, seed):
+    """Return a validated configuration for one model and feature subset."""
+    from .features import PHYSICS_FEATURES
+    result = copy.deepcopy(config)
+    result['data']['candidate_subset'] = list(subset)
+    result['data']['physics'] = bool(set(subset).intersection(PHYSICS_FEATURES))
+    result.update(model=model, seed=seed)
+    return validate_config(result)
+
+
 def data_contract(data):
     keys = ('features', 'target', 'pre', 'horizon', 'resolution', 'scaler',
             'correct_power', 'split', 'physics', 'p_nom_kw', 'plant', 'constraints')
     return copy.deepcopy({**{key: data[key] for key in keys},
+                          **({'candidate_subset': data['candidate_subset']} if 'candidate_subset' in data else {}),
                           'effective_features': feature_names(data),
                           'max_rows': data.get('max_rows'), 'version': CONTRACT_VERSION})
 
@@ -85,12 +106,7 @@ def output_paths(config):
 def validate_study(settings):
     if not isinstance(settings, dict):
         raise ValueError('study must be a configuration mapping.')
-    seeds = settings.get('seeds', [])
-    if (not isinstance(seeds, list) or len(seeds) < 5 or any(type(seed) is not int or seed < 0 for seed in seeds)
-            or len(seeds) != len(set(seeds))):
-        raise ValueError('study.seeds requires at least five distinct nonnegative integers.')
-    for key in ('bootstrap_resamples', 'bootstrap_seed', 'bootstrap_block_length',
-                'min_test_origins', 'min_stratum_origins', 'representative_origins', 'min_bootstrap_blocks'):
+    for key in ('bootstrap_resamples', 'bootstrap_seed', 'bootstrap_block_length', 'min_test_origins'):
         if type(settings.get(key)) is not int or settings[key] < (0 if key == 'bootstrap_seed' else 1):
             raise ValueError(f'study.{key} must be a valid integer.')
     if settings['bootstrap_resamples'] < 1000:

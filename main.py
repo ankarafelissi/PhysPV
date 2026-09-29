@@ -5,17 +5,30 @@ from src.runtime import configure_runtime
 
 def main():
     parser = argparse.ArgumentParser(description='PV forecasting with CNN-LSTM and XGBoost')
-    parser.add_argument('--config', default='config/config.yaml')
+    parser.add_argument('--config', default='config/config.yaml', help='YAML configuration path')
     parser.add_argument('--model', choices=['CNN_LSTM', 'XGBoost', 'all'])
     parser.add_argument('--physics', choices=['on', 'off'], help='Override the physical-feature switch for both model families')
     parser.add_argument('--smoke', action='store_true', help='At most 240 rows, PRE=2, H=1, one epoch / five trees')
+    parser.add_argument('--feature-study', action='store_true',
+                        help='Run the one-seed validation-selected feature comparison')
     args = parser.parse_args()
     configure_runtime()
     from src.config import load_config
     from src.train import run
     config = load_config(args.config)
+    if args.feature_study:
+        from src.experiments import run as experiment
+        if args.model or args.physics:
+            parser.error('--feature-study controls both models and all feature arms; omit --model/--physics')
+        if args.smoke:
+            parser.error('Use python -m src.experiments --smoke for the workflow diagnostic')
+        experiment(config)
+        return
     if args.physics is not None:
-        config['data']['physics'] = args.physics == 'on'
+        from src.features import CANDIDATE_FEATURES
+        enabled = args.physics == 'on'
+        config['data']['physics'] = enabled
+        config['data']['candidate_subset'] = list(CANDIDATE_FEATURES) if enabled else []
     names = ['CNN_LSTM', 'XGBoost'] if args.model == 'all' else [args.model or config['model']]
     for name in names:
         run(config, name, smoke=args.smoke)

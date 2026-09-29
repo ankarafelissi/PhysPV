@@ -8,6 +8,7 @@ def configure_runtime(headless=True):
     if headless:
         os.environ.setdefault('MPLBACKEND', 'Agg')
     os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
+    os.environ.setdefault('TF_DETERMINISTIC_OPS', '1')
     if os.name == 'nt':
         prefix = Path(sys.prefix)
         paths = [prefix / 'Library' / 'bin', prefix / 'Scripts', prefix]

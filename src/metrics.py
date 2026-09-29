@@ -4,6 +4,83 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 
+def constrain_power(predicted, config):
+    """Apply configured output constraints without changing raw predictions."""
+    values = np.asarray(predicted, dtype=float).copy()
+    if not np.isfinite(values).all():
+        raise ValueError('Cannot constrain non-finite predictions.')
+    rules = config['constraints']
+    if rules['nonnegative']:
+        values = np.maximum(values, 0)
+    if rules['capacity']:
+        limit = config['plant'].get('ac_capacity_kw')
+        if limit is None or not np.isfinite(limit) or limit <= 0:
+            raise ValueError('A confirmed positive AC capacity is required for clipping.')
+        values = np.minimum(values, limit)
+    return values
+
+
+def forecast_health(observed, predicted):
+    """Detect constant forecast heads against varying targets."""
+    observed, predicted = (np.asarray(values, dtype=float) for values in (observed, predicted))
+    if observed.ndim != 2 or not observed.size or observed.shape != predicted.shape:
+        raise ValueError('Health checks require matching nonempty (origins, horizon) arrays.')
+    if not np.isfinite(observed).all() or not np.isfinite(predicted).all():
+        raise ValueError('Health checks found non-finite observations or predictions.')
+    target_span = np.ptp(observed, axis=0)
+    prediction_span = np.ptp(predicted, axis=0)
+    return pd.DataFrame({
+        'horizon': np.arange(1, observed.shape[1] + 1),
+        'n': len(observed),
+        'MAE': np.mean(abs(predicted - observed), axis=0),
+        'target_span': target_span,
+        'prediction_span': prediction_span,
+        'prediction_min': predicted.min(axis=0),
+        'prediction_max': predicted.max(axis=0),
+        'prediction_std': predicted.std(axis=0),
+        'zero_fraction': np.mean(predicted == 0, axis=0),
+        'negative_fraction': np.mean(predicted < 0, axis=0),
+        'collapsed': (prediction_span == 0) & (target_span > 0),
+    })
+
+
+def require_healthy_forecasts(health, partition):
+    failed = health.loc[health['collapsed'], 'horizon'].tolist()
+    if failed:
+        raise ValueError(
+            f'{partition} forecasts are constant despite varying targets at horizons {failed}.')
+
+
+def fit_scenario_thresholds(train):
+    """Fit scenario cutoffs from TRAIN only."""
+    for key in ('sky_variability', 'power_level', 'ramp_magnitude'):
+        if key not in train or not np.isfinite(train[key]).all():
+            raise ValueError(f'Finite TRAIN {key} is required for scenario thresholds.')
+    return {
+        'sky_variability': float(np.median(train['sky_variability'])),
+        'power_level': float(np.median(train['power_level'])),
+        'ramp_magnitude': np.median(train['ramp_magnitude'], axis=0).tolist(),
+        'method': ('TRAIN median; sky=trailing POA std(ddof=0); '
+                   'power=trailing target mean; ramp=abs(y[t+h]-y[t]), post-hoc only'),
+    }
+
+
+def scenario_labels(part, thresholds):
+    horizon = part['Y'].shape[1]
+    ramps = np.asarray(thresholds['ramp_magnitude'])
+    if ramps.shape != (horizon,):
+        raise ValueError('Stored ramp thresholds do not match the forecast horizon.')
+    return {
+        'sky_condition': np.repeat(
+            np.where(part['sky_variability'] <= thresholds['sky_variability'],
+                     'clear', 'cloudy')[:, None], horizon, axis=1),
+        'power_level_class': np.repeat(
+            np.where(part['power_level'] <= thresholds['power_level'],
+                     'low', 'high')[:, None], horizon, axis=1),
+        'ramp_class': np.where(part['ramp_magnitude'] <= ramps, 'steady', 'ramp'),
+    }
+
+
 def evaluate(observed, predicted, persistence, p_nom_kw, name='Forecaster'):
     observed, predicted, persistence = [np.asarray(x, dtype=float) for x in (observed, predicted, persistence)]
     if observed.ndim != 2 or observed.size == 0:
@@ -19,16 +96,15 @@ def evaluate(observed, predicted, persistence, p_nom_kw, name='Forecaster'):
         error = values - observed
         for h in range(observed.shape[1]):
             mse = float(np.mean(error[:, h] ** 2))
+            variance = float(np.mean((observed[:, h] - observed[:, h].mean()) ** 2))
             rows.append({'model': label, 'horizon': h+1, 'MAE': float(np.mean(abs(error[:, h]))),
+                         'R2': float(1 - mse / variance) if variance > 0 else np.nan,
                          'MSE': mse, 'RMSE': float(np.sqrt(mse)),
                          'nRMSE_cap': float(100 * np.sqrt(mse) / p_nom_kw), 'n': len(observed)})
     return pd.DataFrame(rows)
 
 
 def export_results(part, predicted, name, run_id, paths, config, thresholds):
-    from .constraints import constrain_power
-    from .scenarios import scenario_labels
-    from .diagnostics import forecast_health
     constrained = constrain_power(predicted, config['data'])
     # The forecast head returns float32, which decimal text does not round-trip
     # exactly. These CSVs are the report's source of truth, so widen them to float64
@@ -97,7 +173,7 @@ def paired_bootstrap(delta_errors, resamples, seed, block_length):
     """Paired circular block bootstrap over sorted origins, not seed replicas.
 
     delta_errors contains PI absolute error minus baseline absolute error,
-    averaged over the predeclared seed set at each origin before resampling.
+    averaged by forecast origin before resampling.
     """
     delta = np.asarray(delta_errors, dtype=float)
     if delta.ndim != 1 or not len(delta) or not np.isfinite(delta).all():

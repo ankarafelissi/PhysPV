@@ -5,6 +5,7 @@ import pandas as pd
 PHYSICS_FEATURES = ('Pac', 'Pdc', 'TempModule', 'TempCell')
 RESERVED_PHYSICS = (*PHYSICS_FEATURES, 'TempModule_RP')
 PHYSICAL_INPUTS = ('POA Irr[kW1m2]', 'TEMPERATURE[degC]', 'WIND_SPEED[m1s]')
+CANDIDATE_FEATURES = ('POA Irr[kW1m2]', 'GHI[kW1m2]', *PHYSICS_FEATURES, 'HoursOfDay')
 
 
 def feature_names(config):
@@ -18,6 +19,15 @@ def feature_names(config):
         raise ValueError('data.features must not contain duplicates.')
     if set(base).intersection(RESERVED_PHYSICS):
         raise ValueError('Do not list physics columns in data.features; use data.physics.')
+    if 'candidate_subset' in config:
+        subset = config['candidate_subset']
+        if (not isinstance(subset, list) or len(subset) != len(set(subset))
+                or not set(subset).issubset(CANDIDATE_FEATURES)
+                or set(base).intersection(CANDIDATE_FEATURES)):
+            raise ValueError('candidate_subset must contain unique supported candidates, separate from common features.')
+        if config['physics'] != bool(set(subset).intersection(PHYSICS_FEATURES)):
+            raise ValueError('data.physics must match the presence of derived physical candidates.')
+        return list(base) + [name for name in CANDIDATE_FEATURES if name in subset]
     return base + list(PHYSICS_FEATURES) if config['physics'] else list(base)
 
 
@@ -102,6 +112,9 @@ def build_features(frame, config):
     physical = pv_power_features(result, config['plant'])
     # Compute eligibility in both arms, but expose no physics columns when off.
     result.attrs['eligible_rows'] = np.isfinite(physical.to_numpy()).all(axis=1)
+    if 'candidate_subset' in config:
+        # Every arm is eligible on the full pool, including an unused GHI sensor.
+        result.attrs['eligible_rows'] &= np.isfinite(result[['GHI[kW1m2]']].to_numpy()).all(axis=1)
     if 'HoursOfDay' in names:
         result['HoursOfDay'] = result.index.hour
     for name, column, operation in (
@@ -112,9 +125,12 @@ def build_features(frame, config):
         if name in names:
             rolling = result[column].rolling(config['horizon'])
             result[name] = rolling.mean() if operation == 'mean' else rolling.std(ddof=0)
-    if config['physics']:
+    selected_physics = set(names).intersection(PHYSICS_FEATURES)
+    if selected_physics:
         for name in PHYSICS_FEATURES:
+            if name not in selected_physics:
+                continue
             result[name] = physical[name]
-    if set(result.columns).intersection(RESERVED_PHYSICS) != (set(PHYSICS_FEATURES) if config['physics'] else set()):
+    if set(result.columns).intersection(RESERVED_PHYSICS) != selected_physics:
         raise ValueError('Physics feature invariant violated.')
     return result

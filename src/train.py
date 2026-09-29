@@ -2,6 +2,7 @@
 import copy
 import json
 import logging
+from time import perf_counter
 from datetime import datetime
 
 import joblib
@@ -12,11 +13,10 @@ from .config import arm_name, data_contract, output_paths, validate_config, smok
 from .data import load_data, prepare_data
 from .paths import project_path
 from .features import build_features
-from .metrics import export_training_curve
+from .metrics import (export_training_curve, fit_scenario_thresholds,
+                      forecast_health, require_healthy_forecasts)
 from .models import SUPPORTED_MODELS, load_model, predict_scaled, save_model, train_model
 from .provenance import environment_metadata, input_identity, partition_metadata
-from .scenarios import fit_thresholds
-from .diagnostics import forecast_health, require_healthy_forecasts
 
 
 def run(config, model_name=None, smoke=False):
@@ -45,11 +45,13 @@ def run(config, model_name=None, smoke=False):
         cache.parent.mkdir(parents=True, exist_ok=True)
         frame.to_hdf(cache, key='features', mode='w')
         splits, scalers = prepare_data(frame, config['data'])
-        thresholds = fit_thresholds(splits['TRAIN'])
+        thresholds = fit_scenario_thresholds(splits['TRAIN'])
         sizes = {key: len(part['X']) for key, part in splits.items()}
         logger.info('Rows=%s; samples=%s', len(frame), sizes)
         print(f'{name}: {sizes}')
+        started = perf_counter()
         model, history = train_model(name, config['models'][name], splits, config['seed'])
+        training_seconds = perf_counter() - started
         # Validate restored best weights on VAL, never use TEST to select a model.
         validation_scaled = predict_scaled(model, name, splits['VAL']['X'])
         validation_predicted = scalers['Y'].inverse_transform(
@@ -70,6 +72,7 @@ def run(config, model_name=None, smoke=False):
             'partitions': partition_metadata(splits), 'input': input_identity(config['data']),
             'environment': environment_metadata(), 'scenario_thresholds': thresholds,
             'validation_health': health.to_dict('records'),
+            'training_seconds': training_seconds,
             'train_target_end': str(splits['TRAIN']['target_times'][-1, -1]),
             'validation_target_end': str(splits['VAL']['target_times'][-1, -1]),
             'samples': sizes, 'smoke': is_smoke,
