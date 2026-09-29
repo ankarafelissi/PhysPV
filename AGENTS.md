@@ -6,18 +6,32 @@ improve observed PV-power forecasting across XGBoost and CNN-LSTM. Persistence i
 the deterministic floor. Negative and mixed results are valid. Do not add model
 architectures or optimize toward a desired conclusion.
 
-The current workflow uses one fixed seed (`11`) selected from TRAIN/VAL diagnostics
-only. Never choose the seed, features or hyperparameters from TEST performance.
+The current workflow uses one fixed seed.
 
 ## Working style
 - Keep one clear default experiment path and simple YAML configuration.
 - Prefer short, explicit functions over abstractions that hide data flow.
-- Preserve chronological splits, train-only scaler fitting and VAL-only selection.
+- Do not add hash-related code, SHA-256 identities, file digests, or cryptographic provenance checks.
 - Run no training experiment unless the user explicitly asks for it.
-- Freeze the source layout before starting an experiment. Do not rename, move, add,
-  delete, or reorganize code files while an experiment is running or being resumed.
 - Unit tests and compilation checks are allowed after source changes.
-- Report a single-seed result as one reproducible run, not as evidence of seed
-  stability or a publication-level uncertainty estimate.
-- Keep English code, comments and documentation. Preserve dataset attribution in
-  [docs/data.md](docs/data.md).
+- Minimize token use: read targeted files and line ranges, summarize command output,
+  avoid repeated searches or explanations, and keep updates concise. Do not skip
+  necessary implementation or verification to save tokens.
+
+## Experiment hygiene
+- Reuse canonical model, experiment and config names from existing code and YAML.
+  Use descriptive names for new variants; avoid arbitrary aliases or duplicate configs.
+- Assign each run a unique, readable run ID without hashing. Use that same ID to
+  link logs, checkpoints, metrics and the effective config in the existing manifest.
+  Record the command, seed, run type, Git commit reference and dirty-worktree status;
+  preserve the relevant source diff when dirty so the commit is not the sole record.
+- Freeze the effective config and source layout during a run or resume. Validate
+  resume compatibility and create a new run ID for changed settings; never overwrite
+  another run's outputs or silently associate them with a different config or commit.
+- Record started, completed, failed or interrupted status in the existing manifest
+  for every run. Keep failed attempts, their command, error reason and log paths;
+  record retries as distinct attempts rather than erasing failure history.
+- Reuse the existing manifest and output directories for machine-readable records.
+  Update existing documentation in place. Do not create per-run, per-failure or
+  duplicate Markdown reports, or add a new .md file unless explicitly requested
+  or no existing document can reasonably hold the necessary content.
