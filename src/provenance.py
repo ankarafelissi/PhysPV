@@ -4,9 +4,31 @@ import json
 import os
 import platform
 import sys
+import subprocess
 from pathlib import Path
 
 from .paths import project_path
+
+
+def source_record():
+    """Record readable source and Git state without cryptographic identities."""
+    def git(*args):
+        return subprocess.check_output(['git', *args], cwd=project_path('.'), text=True)
+    files = [project_path('main.py'), project_path('requirements.txt')]
+    files += sorted(project_path('src').rglob('*.py'))
+    files += sorted(project_path('config').glob('*.yaml'))
+    return {'commit': git('rev-parse', 'HEAD').strip(),
+            'dirty': bool(git('status', '--porcelain').strip()),
+            'diff': git('diff', 'HEAD', '--', 'src', 'config', 'main.py', 'requirements.txt'),
+            'files': {str(p.relative_to(project_path('.'))): p.read_text(encoding='utf-8')
+                      for p in files},
+            'command': subprocess.list2cmdline([sys.executable, *sys.argv])}
+
+
+def validate_source(saved):
+    current = source_record()
+    if current['commit'] != saved['commit'] or current['files'] != saved['files']:
+        raise ValueError('Source or Git commit changed; create a new study instead of resuming.')
 
 
 def write_json(path, value):
@@ -18,7 +40,9 @@ def write_json(path, value):
 
 
 def input_identity(config):
-    return {'path': str(project_path(config['path']).resolve())}
+    path = project_path(config['path']).resolve()
+    info = path.stat()
+    return {'path': str(path), 'size_bytes': info.st_size, 'modified_ns': info.st_mtime_ns}
 
 
 def partition_metadata(splits):
@@ -32,7 +56,7 @@ def partition_metadata(splits):
 def environment_metadata():
     versions = {}
     for name in ('numpy', 'pandas', 'scikit-learn', 'tensorflow', 'keras', 'xgboost',
-                 'tables', 'joblib', 'PyYAML', 'matplotlib'):
+                 'tables', 'joblib', 'PyYAML', 'matplotlib', 'optuna'):
         try:
             versions[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:

@@ -10,7 +10,7 @@ from datetime import datetime
 from .runtime import configure_runtime
 
 
-def run(model_dir, config=None):
+def run(model_dir, config=None, run_id=None):
     configure_runtime()
     import joblib
     from .config import arm_name, data_contract, load_config, output_paths, validate_config
@@ -48,7 +48,7 @@ def run(model_dir, config=None):
     predicted = scalers['Y'].inverse_transform(scaled.reshape(-1, 1)).reshape(scaled.shape)
     paths = output_paths(config)
     rung = arm_name(name, config['data']['physics'])
-    run_id = datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '_' + rung + f'_s{config["seed"]}_predict'
+    run_id = run_id or (datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '_' + rung + f'_s{config["seed"]}_predict')
     scores = export_results(splits['TEST'], predicted, rung, run_id, paths, config, saved['scenario_thresholds'])
     (paths['results'] / f'{run_id}_metadata.json').write_text(json.dumps({
         'model_dir': str(artifact), 'model': name, 'arm': rung, 'config': config,

@@ -9,6 +9,17 @@ import pandas as pd
 from .metrics import paired_bootstrap
 
 
+def classify_result(mae_change_percent, rmse_change_percent, ci_low, ci_high):
+    """Predeclared descriptive classes; never used to choose a model."""
+    if abs(mae_change_percent) < 1.0:
+        return 'small_effect'
+    if mae_change_percent * rmse_change_percent < 0:
+        return 'metric_tradeoff'
+    if ci_low <= 0 <= ci_high:
+        return 'uncertain'
+    return 'improvement' if mae_change_percent < 0 else 'degradation'
+
+
 def report(directory, state):
     config = state['config']
     raw_rows = []
@@ -79,29 +90,29 @@ def report(directory, state):
     figure_dir = project_path(config['output_dir']) / 'figures'
     create_figures(state, comparison, ablation, screen_summary, prediction_frames, figure_dir)
 
-    lines = [f"# Staged physics-aware study: {state['study_id']}", '',
-             'Hyperparameters were fixed before feature screening. Physics candidates were formed only by adding derived features to the same strong non-PI reference.', '',
-             f"Fixed seed: {config['seed']}. This run does not estimate seed-to-seed variability.", '',
-             '| Model | Selected PI arm | Reference MAE | Selected MAE | Delta MAE | Paired 95% CI |',
-             '|---|---|---:|---:|---:|---:|']
     signs = []
+    conclusions = []
     for model, selected in state['selected'].items():
         base = comparison.query('model == @model and arm == "nonpi_reference" and horizon == 0').iloc[0]
         pi = comparison.query('model == @model and arm == @selected and horizon == 0').iloc[0]
         delta = ablation.query('model == @model and horizon == 0').iloc[0]
         signs.append(np.sign(delta.delta_mae))
-        lines.append(f'| {model} | {selected} | {base.MAE:.6f} | '
-                     f'{pi.MAE:.6f} | {delta.delta_mae:+.6f} | '
-                     f'[{delta.ci_low:+.6f}, {delta.ci_high:+.6f}] |')
+        mae_percent = 100 * (pi.MAE / base.MAE - 1) if base.MAE > 0 else np.nan
+        rmse_percent = 100 * (pi.RMSE / base.RMSE - 1) if base.RMSE > 0 else np.nan
+        conclusions.append({'model': model, 'selected_arm': selected,
+                            'mae_change_percent': mae_percent, 'rmse_change_percent': rmse_percent,
+                            'ci_low': float(delta.ci_low), 'ci_high': float(delta.ci_high),
+                            'classification': classify_result(mae_percent, rmse_percent,
+                                                              delta.ci_low, delta.ci_high)})
     consistent = len(set(signs)) == 1
     direction = 'improvement' if consistent and signs[0] < 0 else 'degradation' if consistent else 'mixed'
-    lines += ['', f'Cross-model TEST trend: **{direction}**.',
-              'A matching sign is reported as an observation, not manufactured as a selection constraint. '
-              'Feature selection used validation data only; TEST results did not alter hyperparameters or subsets.', '',
-              'Negative and mixed results remain valid. Screening tables are validation diagnostics and are not final TEST evidence.']
-    if config.get('smoke_study'):
-        lines.insert(2, '**Execution diagnostic only: this smoke run is not research evidence.**')
-    (directory / 'research_summary.md').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    # Machine-readable conclusions belong in the existing manifest, not a per-run Markdown report.
+    state['summary'] = {'cross_model_mae_trend': direction, 'seed': config['seed'],
+                        'smoke_diagnostic_only': bool(config.get('smoke_study')),
+                        'models': conclusions, 'small_effect_threshold_percent': 1.0,
+                        'interpretation': 'Single-seed exploratory comparison; inspect both MAE and RMSE.'}
+    from .provenance import write_json
+    write_json(directory / 'manifest.json', state)
 
 
 def main():
@@ -110,7 +121,7 @@ def main():
     args = parser.parse_args()
     manifest = Path(args.manifest)
     state = json.loads(manifest.read_text(encoding='utf-8'))
-    if state['status'] not in ('evaluated', 'complete'):
+    if state['status'] not in ('evaluated', 'complete', 'completed'):
         raise ValueError('The experiment has no complete TEST predictions to report.')
     report(manifest.parent, state)
 

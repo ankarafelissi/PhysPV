@@ -1,6 +1,11 @@
 # Single reproducible experiment configuration.
 seed: 11
 
+tuning:
+  enabled: true
+  trials_per_model: 12
+  startup_trials: 4
+
 data:
   path: data/raw/SOLETE_Pombo_60min.h5
   processed_path: data/processed/solete_hourly_features.h5

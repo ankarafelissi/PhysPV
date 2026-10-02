@@ -70,10 +70,10 @@ def _prepare_study(config, arms, directory):
     return expected
 
 
-def _train_record(config, arm, model, seed, expected_partitions):
+def _train_record(config, arm, model, seed, expected_partitions, run_id=None):
     from .paths import project_path
     from .train import run as train
-    result = train(arm_config(config, arm['subset'], model, seed))
+    result = train(arm_config(config, arm['subset'], model, seed), run_id=run_id)
     metadata_path = result['artifact'] / 'metadata.json'
     metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
     if metadata['partitions'] != expected_partitions:
@@ -102,17 +102,22 @@ def _select(screening, arms, seed):
     return selected
 
 
-def run(config=None, resume=None):
+def _run(config=None, resume=None):
     configure_runtime()
     import tables  # noqa: F401
     from .config import validate_study
     from .paths import project_path
     from .predict import run as predict
-    from .provenance import environment_metadata, input_identity
+    from .provenance import environment_metadata, input_identity, source_record, validate_source
 
     if resume:
         manifest = project_path(resume)
         state = json.loads(manifest.read_text(encoding='utf-8'))
+        if 'source' not in state:
+            raise ValueError('Legacy studies cannot resume as v2.0; start a new study.')
+        validate_source(state['source'])
+        if config is not None and config != state['requested_config']:
+            raise ValueError('Changed settings require a new study ID.')
         config, arms, directory = state['config'], state['arms'], manifest.parent
         if state['environment'] != environment_metadata() or state['input'] != input_identity(config['data']):
             raise ValueError('Runtime environment or configured input path changed; resume is not comparable.')
@@ -123,15 +128,64 @@ def run(config=None, resume=None):
         study_id = datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '_features'
         directory = project_path(config['output_dir']) / 'results' / study_id
         directory.mkdir(parents=True)
-        partitions = _prepare_study(config, arms, directory)
-        if (partitions['TEST']['n_origins'] < config['study']['min_test_origins']
-                and not config.get('smoke_study')):
-            raise ValueError('Insufficient TEST origins for the final comparison.')
-        state = {'study_id': study_id, 'config': config, 'arms': arms, 'environment': environment_metadata(),
-                 'input': input_identity(config['data']), 'partitions': partitions,
-                 'status': 'screening', 'screening': [], 'selected': None, 'final': []}
+        state = {'study_id': study_id, 'config': copy.deepcopy(config),
+                 'requested_config': copy.deepcopy(config), 'source': source_record(),
+                 'attempts': [], 'arms': arms, 'environment': environment_metadata(),
+                 'input': input_identity(config['data']), 'partitions': None,
+                 'status': 'started', 'screening': [], 'selected': None, 'final': []}
         manifest = directory / 'manifest.json'
         write_json(manifest, state)
+    if state['partitions'] is None:
+        try:
+            state['partitions'] = _prepare_study(config, arms, directory)
+            if (state['partitions']['TEST']['n_origins'] < config['study']['min_test_origins']
+                    and not config.get('smoke_study')):
+                raise ValueError('Insufficient TEST origins for the final comparison.')
+        except (Exception, KeyboardInterrupt) as error:
+            state.update(status='interrupted' if isinstance(error, KeyboardInterrupt) else 'failed',
+                         error=str(error))
+            write_json(manifest, state)
+            raise
+        write_json(manifest, state)
+    partitions = state['partitions']
+    state['status'] = 'started'
+    for attempt in state.get('attempts', []):
+        if attempt['status'] == 'started':
+            attempt.update(status='interrupted', error='Previous process ended before completion.')
+    for model_record in state.get('tuning', {}).values():
+        for trial in model_record['trials']:
+            if trial['status'] == 'started':
+                trial.update(status='interrupted', error='Previous process ended before completion.')
+    write_json(manifest, state)
+
+    def fit(candidate, arm, model, run_type):
+        run_id = (datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+                  + f'_{model}_{run_type}_{arm["id"]}_s{candidate["seed"]}')
+        attempt = {'run_id': run_id, 'run_type': run_type, 'model': model,
+                   'arm': arm['id'], 'seed': candidate['seed'], 'status': 'started',
+                   'command': state['source']['command'], 'commit': state['source']['commit'],
+                   'dirty': state['source']['dirty'],
+                   'effective_config': arm_config(candidate, arm['subset'], model, candidate['seed']),
+                   'log': str(project_path(candidate['output_dir']) / 'results' / f'{run_id}_train.log')}
+        state['attempts'].append(attempt)
+        write_json(manifest, state)
+        try:
+            result = _train_record(candidate, arm, model, candidate['seed'], partitions, run_id)
+            validate_source(state['source'])
+            attempt.update(status='completed', artifact=result['artifact'])
+        except (Exception, KeyboardInterrupt) as error:
+            attempt.update(status='interrupted' if isinstance(error, KeyboardInterrupt) else 'failed',
+                           error=str(error))
+            state['status'] = attempt['status']
+            write_json(manifest, state)
+            raise
+        write_json(manifest, state)
+        return result
+
+    if config.get('tuning', {}).get('enabled') and not state.get('parameters_frozen'):
+        from .tuning import tune
+        tune(config, state, manifest, fit)
+    config = state['config']
     validate_study(config['study'])
     screening_seed = config['seed']
     if state['selected'] is None:
@@ -140,7 +194,7 @@ def run(config=None, resume=None):
                 if any(row['model'] == model and row['arm'] == arm['id'] for row in state['screening']):
                     continue
                 print(f"SCREEN {model} {arm['id']} seed={screening_seed}", flush=True)
-                state['screening'].append(_train_record(config, arm, model, screening_seed, partitions))
+                state['screening'].append(fit(config, arm, model, 'screening'))
                 write_json(manifest, state)
         state['selected'] = _select(state['screening'], arms, screening_seed)
         state['status'] = 'selection_frozen'
@@ -150,24 +204,52 @@ def run(config=None, resume=None):
     for model in ('XGBoost', 'CNN_LSTM'):
         final_ids = ['nonpi_reference', state['selected'][model]]
         for arm_id in final_ids:
+            validate_source(state['source'])
             arm = next(item for item in arms if item['id'] == arm_id)
             if any(row['model'] == model and row['arm'] == arm_id for row in state['final']):
                 continue
             existing = next(row for row in state['screening']
                             if row['model'] == model and row['arm'] == arm_id)
             record = copy.deepcopy(existing)
-            prediction = predict(record['artifact'])
+            prediction_id = datetime.now().strftime('%Y%m%d_%H%M%S_%f') + f'_{model}_{arm_id}_predict'
+            attempt = {'run_id': prediction_id, 'run_type': 'prediction', 'status': 'started',
+                       'model': model, 'arm': arm_id, 'seed': config['seed'],
+                       'command': state['source']['command'], 'commit': state['source']['commit'],
+                       'dirty': state['source']['dirty'], 'artifact': record['artifact'],
+                       'effective_config': arm_config(config, arm['subset'], model, config['seed'])}
+            state['attempts'].append(attempt)
+            write_json(manifest, state)
+            try:
+                prediction = predict(record['artifact'], run_id=prediction_id)
+                attempt.update(status='completed', metadata=str(prediction['metadata_path']))
+            except (Exception, KeyboardInterrupt) as error:
+                attempt.update(status='interrupted' if isinstance(error, KeyboardInterrupt) else 'failed',
+                               error=str(error))
+                state['status'] = attempt['status']
+                write_json(manifest, state)
+                raise
             record['prediction_metadata'] = str(prediction['metadata_path'])
             state['final'].append(record)
             write_json(manifest, state)
     state['status'] = 'evaluated'
     write_json(manifest, state)
     from .evaluation import report
-    report(directory, state)
-    state['status'] = 'complete'
+    try:
+        report(directory, state)
+    except (Exception, KeyboardInterrupt) as error:
+        state.update(status='interrupted' if isinstance(error, KeyboardInterrupt) else 'failed',
+                     error=str(error))
+        write_json(manifest, state)
+        raise
+    state['status'] = 'completed'
     write_json(manifest, state)
     print(f'Completed: {manifest}', flush=True)
     return manifest
+
+
+def run(config=None, resume=None):
+    """Run the default tuning-then-feature workflow."""
+    return _run(copy.deepcopy(config), resume)
 
 
 def main():

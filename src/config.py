@@ -121,4 +121,6 @@ def smoke_config(config):
     for model, params in overrides["models"].items():
         result["models"][model].update(params)
     result["smoke_study"] = True
+    if 'tuning' in result:
+        result['tuning'].update(trials_per_model=1, startup_trials=1)
     return validate_config(result)
