@@ -1,12 +1,7 @@
 # Project rules
 
 ## Research scope
-Test whether physics-informed feature expansion and model-specific feature selection
-improve observed PV-power forecasting across XGBoost and CNN-LSTM. Persistence is
-the deterministic floor. Negative and mixed results are valid. Do not add model
-architectures or optimize toward a desired conclusion.
-
-The current workflow uses one fixed seed.
+PhysPV studies which physics-informed features improve PV-power forecasting and whether their usefulness differs between XGBoost and CNN-LSTM.
 
 ## Working style
 - Keep one clear default experiment path and simple YAML configuration.
