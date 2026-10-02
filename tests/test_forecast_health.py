@@ -6,9 +6,19 @@ configure_runtime()
 import numpy as np
 from src.config import load_config, validate_config
 from src.metrics import forecast_health, require_healthy_forecasts
+from src.models.cnn_lstm import ValidationLossGuard
 
 
 class ForecastHealthTests(unittest.TestCase):
+    def test_validation_loss_guard_requires_consecutive_severe_anomalies(self):
+        guard = ValidationLossGuard(patience=3, factor=2.0, minimum_increase=0.05)
+        self.assertFalse(guard.observe(0.2))
+        self.assertFalse(guard.observe(0.41))
+        self.assertFalse(guard.observe(0.42))
+        self.assertTrue(guard.observe(0.43))
+        guard = ValidationLossGuard()
+        self.assertTrue(guard.observe(np.nan))
+
     def test_zero_and_nonzero_constant_heads_are_detected(self):
         observed = np.arange(12.).reshape(6, 2)
         health = forecast_health(observed, np.tile([0., 2.], (6, 1)))

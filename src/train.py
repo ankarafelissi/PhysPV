@@ -19,7 +19,7 @@ from .models import SUPPORTED_MODELS, load_model, predict_scaled, save_model, tr
 from .provenance import environment_metadata, input_identity, partition_metadata
 
 
-def run(config, model_name=None, smoke=False):
+def run(config, model_name=None, smoke=False, run_id=None):
     config = copy.deepcopy(config)
     name = model_name or config['model']
     if name not in SUPPORTED_MODELS:
@@ -30,8 +30,11 @@ def run(config, model_name=None, smoke=False):
         config = smoke_config(config)
     is_smoke = smoke or config.get('smoke_study', False)
     rung = arm_name(name, config['data']['physics'])
-    run_id = datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '_' + rung + f'_s{config["seed"]}' + ('_smoke' if is_smoke else '')
+    run_id = run_id or (datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '_' + rung + f'_s{config["seed"]}' + ('_smoke' if is_smoke else ''))
     paths = output_paths(config)
+    artifact = paths['models'] / run_id
+    artifact.mkdir()
+    (artifact / 'config.yaml').write_text(yaml.safe_dump(config, sort_keys=False), encoding='utf-8')
     logger = logging.getLogger(run_id)
     logger.setLevel(logging.INFO)
     logger.propagate = False
@@ -49,8 +52,13 @@ def run(config, model_name=None, smoke=False):
         sizes = {key: len(part['X']) for key, part in splits.items()}
         logger.info('Rows=%s; samples=%s', len(frame), sizes)
         print(f'{name}: {sizes}')
+        checkpoint = artifact / 'best_checkpoint' / 'weights' if name == 'CNN_LSTM' else None
+        if checkpoint:
+            checkpoint.parent.mkdir()
         started = perf_counter()
-        model, history = train_model(name, config['models'][name], splits, config['seed'])
+        model, history = train_model(
+            name, config['models'][name], splits, config['seed'],
+            checkpoint_path=checkpoint, logger=logger)
         training_seconds = perf_counter() - started
         # Validate restored best weights on VAL, never use TEST to select a model.
         validation_scaled = predict_scaled(model, name, splits['VAL']['X'])
@@ -62,8 +70,6 @@ def run(config, model_name=None, smoke=False):
         (paths['results'] / f'{run_id}_history.json').write_text(json.dumps(history, indent=2), encoding='utf-8')
         if not is_smoke:
             require_healthy_forecasts(health, 'Validation')
-        artifact = paths['models'] / run_id
-        artifact.mkdir()
         save_model(model, name, artifact)
         joblib.dump(scalers, artifact / 'scalers.joblib')
         (artifact / 'metadata.json').write_text(json.dumps({
@@ -72,6 +78,7 @@ def run(config, model_name=None, smoke=False):
             'partitions': partition_metadata(splits), 'input': input_identity(config['data']),
             'environment': environment_metadata(), 'scenario_thresholds': thresholds,
             'validation_health': health.to_dict('records'),
+            'best_checkpoint': str(checkpoint.relative_to(artifact)) if checkpoint else None,
             'training_seconds': training_seconds,
             'train_target_end': str(splits['TRAIN']['target_times'][-1, -1]),
             'validation_target_end': str(splits['VAL']['target_times'][-1, -1]),

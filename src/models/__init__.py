@@ -5,9 +5,11 @@ from .xgboost import XGBoostForecaster
 SUPPORTED_MODELS = ('CNN_LSTM', 'XGBoost')
 
 
-def train_model(name, params, splits, seed):
+def train_model(name, params, splits, seed, checkpoint_path=None, logger=None):
     if name == 'CNN_LSTM':
-        return cnn_lstm.train(params, splits, seed)
+        if checkpoint_path is None or logger is None:
+            raise ValueError('CNN-LSTM training requires a checkpoint path and logger.')
+        return cnn_lstm.train(params, splits, seed, checkpoint_path, logger)
     if name == 'XGBoost':
         train, val = splits['TRAIN'], splits['VAL']
         model = XGBoostForecaster(params, seed).fit(
