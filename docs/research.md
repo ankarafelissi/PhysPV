@@ -9,6 +9,13 @@ architecture or loss function.
 
 ## Experimental controls
 
+Version 2.0 uses a bounded Optuna TPE search on the non-PI reference before feature
+selection. Each family receives 12 attempts with identical seed and partitions;
+the existing configuration is the first candidate. The objective is validation MAE
+averaged over horizons in kW. Failed trials are retained and count toward the budget.
+All physical feature arms subsequently use the winning parameters unchanged.
+Tuning is a preparation step; the research question concerns physical features.
+
 - Use one fixed seed: `11`.
 - Preserve chronological TRAIN/VAL/TEST partitions.
 - Fit scalers and scenario thresholds on TRAIN only.
@@ -52,3 +59,11 @@ Each study stores its frozen configuration, configured input path, runtime envir
 partition boundaries, selected features and run links in
 `outputs/results/STUDY_ID/manifest.json`. Changing source code or input data requires a
 new training study.
+
+The manifest summary reports relative MAE/RMSE changes and paired MAE intervals.
+MAE changes below 1% are labeled small effects; opposing MAE/RMSE directions are
+metric tradeoffs; intervals crossing zero are uncertain. The threshold is descriptive,
+not a selection criterion. No trend or practical improvement is guaranteed.
+No per-run Markdown summary is created. Failed/interrupted attempts and retries remain
+in the existing manifest with distinct readable run IDs. Source text and Git diff are
+recorded without file digests or cryptographic checks.

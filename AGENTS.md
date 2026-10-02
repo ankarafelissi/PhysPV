@@ -3,6 +3,12 @@
 ## Research scope
 PhysPV studies which physics-informed features improve PV-power forecasting and whether their usefulness differs between XGBoost and CNN-LSTM.
 
+Use bounded Bayesian/TPE optimization to obtain reasonable configurations; tuning is
+not a research objective. Freeze parameters before individual and combination feature
+experiments. Negative and mixed results are valid. Never optimize toward a desired
+conclusion or add model families. Use one default seed; extra seeds are only used for
+final selected experiments when explicitly requested.
+
 ## Working style
 - Keep one clear default experiment path and simple YAML configuration.
 - Prefer short, explicit functions over abstractions that hide data flow.
