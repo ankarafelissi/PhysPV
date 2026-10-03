@@ -104,20 +104,16 @@ def report(directory, state):
     for record in state['final']:
         metadata_path = Path(record['prediction_metadata'])
         metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
-        metrics_path = metadata_path.with_name(metadata['run_id'] + '_metrics.csv')
-        prediction_path = metadata_path.with_name(metadata['run_id'] + '.csv')
+        metrics_path = metadata_path.with_name(
+            metadata.get('metrics_file', metadata['run_id'] + '_metrics.csv'))
+        prediction_path = metadata_path.with_name(
+            metadata.get('prediction_file', metadata['run_id'] + '.csv'))
         metrics = pd.read_csv(metrics_path)
         if persistence is None:
             persistence = metrics[(metrics['variant'] == 'raw') & (metrics['model'] == 'Persistence')].copy()
             persistence['model'], persistence['arm'], persistence['seed'] = 'Persistence', 'persistence', -1
-            persistence['features'], persistence['hyperparameters'] = '[]', '{}'
-            persistence['training_seconds'], persistence['prediction_seconds'] = 0.0, 0.0
         metrics = metrics[(metrics['variant'] == 'raw') & (metrics['model'] != 'Persistence')].copy()
         metrics['model'], metrics['arm'], metrics['seed'] = record['model'], record['arm'], record['seed']
-        metrics['features'] = json.dumps(record['subset'])
-        metrics['hyperparameters'] = json.dumps(config['models'][record['model']], sort_keys=True)
-        metrics['training_seconds'] = record['training_seconds']
-        metrics['prediction_seconds'] = metadata['prediction_seconds']
         raw_rows.append(metrics)
         prediction_frames[record['model'], record['arm'], record['seed']] = pd.read_csv(prediction_path)
     results = pd.concat(raw_rows + [persistence], ignore_index=True)
@@ -128,7 +124,6 @@ def report(directory, state):
             row[metric] = group[metric].mean()
         mean_rows.append(row)
     results = pd.concat([results, pd.DataFrame(mean_rows)], ignore_index=True, sort=False)
-    results.to_csv(directory / 'results.csv', index=False)
     comparison = results[['model', 'arm', 'horizon', 'MAE', 'RMSE', 'nRMSE_cap', 'R2', 'n']].copy()
     comparison.sort_values(['model', 'arm', 'horizon']).to_csv(directory / 'model_comparison.csv', index=False)
 
@@ -152,7 +147,6 @@ def report(directory, state):
     ablation = pd.DataFrame(ablations)
     ablation.to_csv(directory / 'feature_ablation.csv', index=False)
     screen = pd.DataFrame(state['screening'])
-    screen.to_csv(directory / 'validation_screening.csv', index=False)
     screen_summary = screen[['model', 'arm', 'validation_mae']].copy()
     references = screen_summary[screen_summary.arm == 'nonpi_reference'].set_index('model')['validation_mae']
     screen_summary['delta_vs_reference'] = [row['validation_mae'] - references[row['model']]

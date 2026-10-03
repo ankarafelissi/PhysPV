@@ -105,13 +105,22 @@ tests/                  Leakage, physics, metrics and prediction checks
 docs/                   Data contract and research protocol
 ```
 
-The main study directory contains `manifest.json`, `selection.json`, `results.csv`,
-`model_comparison.csv`, `feature_ablation.csv`, correlation tables and
-the machine-readable `summary` in `manifest.json`. MAE and RMSE use kW; `nRMSE_cap` uses the configured 7.44 kW
+The main study directory contains `manifest.json`, `model_comparison.csv`,
+`feature_ablation.csv`, `validation_screening_summary.csv` and correlation tables.
+The manifest holds the selected features, full screening records and machine-readable
+summary. MAE and RMSE use kW; `nRMSE_cap` uses the configured 7.44 kW
 DC nameplate. Horizon `0` means the average of per-horizon metrics.
 
 `tuning_results.csv` lists all tuning attempts and the selected trial for each model;
 `frozen_config.yaml` stores the parameters used by the subsequent feature experiments.
+
+Training and prediction details are grouped under `outputs/results/STUDY_ID/runs/RUN_ID/`.
+Training stores `train.log`, `history.json` and `validation_health.csv`; prediction
+stores `predictions.csv`, `metrics.csv` and `metadata.json`, with forecast health
+embedded in metadata. Standalone runs use `outputs/results/RUN_ID/`.
+Predictions are exported once as CSV. Existing flat-layout results remain readable.
+New runs no longer produce duplicate `results.csv`, `validation_screening.csv`,
+`selection.json` or prediction HDF5 files.
 
 The summary labels small MAE effects (below 1%), metric tradeoffs, uncertain effects,
 improvement and degradation. This descriptive threshold is fixed before training and

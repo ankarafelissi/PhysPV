@@ -71,7 +71,7 @@ class TuningTests(unittest.TestCase):
         self.config['tuning']['trials_per_model'] = 2
         partitions = {'TEST': {'n_origins': 1088}}
         seen = []
-        def simulated_fit(config, arm, model, seed, expected, run_id):
+        def simulated_fit(config, arm, model, seed, expected, run_id, study_dir):
             seen.append((model, copy.deepcopy(config['models'][model])))
             return {'model': model, 'arm': arm['id'], 'seed': seed,
                     'subset': arm['subset'], 'validation_mae': float(len(seen)),

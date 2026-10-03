@@ -17,7 +17,7 @@ from .models import load_model, predict_scaled, save_model, train_model
 from .runtime import environment_metadata, project_path
 
 
-def run(config, model_name=None, smoke=False, run_id=None):
+def run(config, model_name=None, smoke=False, run_id=None, study_dir=None):
     config = copy.deepcopy(config)
     name = model_name or config['model']
     config['model'] = name
@@ -25,14 +25,14 @@ def run(config, model_name=None, smoke=False, run_id=None):
     is_smoke = smoke or config.get('smoke_study', False)
     rung = arm_name(name, config['data']['physics'])
     run_id = run_id or (datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '_' + rung + f'_s{config["seed"]}' + ('_smoke' if is_smoke else ''))
-    paths = output_paths(config)
+    paths = output_paths(config, run_id, study_dir)
     artifact = paths['models'] / run_id
     artifact.mkdir()
     (artifact / 'config.yaml').write_text(yaml.safe_dump(config, sort_keys=False), encoding='utf-8')
     logger = logging.getLogger(run_id)
     logger.setLevel(logging.INFO)
     logger.propagate = False
-    handler = logging.FileHandler(paths['results'] / f'{run_id}_train.log', encoding='utf-8')
+    handler = logging.FileHandler(paths['results'] / 'train.log', encoding='utf-8')
     logger.addHandler(handler)
     try:
         frame = build_features(load_data(config['data']), config['data'])
@@ -60,8 +60,8 @@ def run(config, model_name=None, smoke=False, run_id=None):
             validation_scaled.reshape(-1, 1)).reshape(validation_scaled.shape)
         health = forecast_health(splits['VAL']['Y'], validation_predicted)
         health.insert(0, 'run_id', run_id)
-        health.to_csv(paths['results'] / f'{run_id}_validation_health.csv', index=False)
-        (paths['results'] / f'{run_id}_history.json').write_text(json.dumps(history, indent=2), encoding='utf-8')
+        health.to_csv(paths['results'] / 'validation_health.csv', index=False)
+        (paths['results'] / 'history.json').write_text(json.dumps(history, indent=2), encoding='utf-8')
         if not is_smoke:
             require_healthy_forecasts(health, 'Validation')
         save_model(model, name, artifact)
@@ -71,7 +71,7 @@ def run(config, model_name=None, smoke=False, run_id=None):
             'data_contract': data_contract(config['data']),
             'partitions': partition_metadata(splits), 'input': input_identity(config['data']),
             'environment': environment_metadata(), 'scenario_thresholds': thresholds,
-            'validation_health': health.to_dict('records'),
+            'validation_mae': float(health['MAE'].mean()),
             'best_checkpoint': str(checkpoint.relative_to(artifact)) if checkpoint else None,
             'training_seconds': training_seconds,
             'train_target_end': str(splits['TRAIN']['target_times'][-1, -1]),
@@ -85,7 +85,7 @@ def run(config, model_name=None, smoke=False, run_id=None):
         logger.info('Reload predictions match; artifact=%s', artifact)
         print(f'Model: {artifact}')
         print(f'Predict: python -m src.predict --model-dir "{artifact}"')
-        return {'artifact': artifact, 'run_id': run_id}
+        return {'artifact': artifact, 'run_id': run_id, 'result_dir': paths['results']}
     except Exception:
         logger.exception('Training failed')
         raise

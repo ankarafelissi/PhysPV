@@ -110,11 +110,6 @@ def export_results(part, predicted, name, run_id, paths, config, thresholds):
     predicted = np.asarray(predicted, dtype=float)
     constrained = np.asarray(constrained, dtype=float)
     horizon = predicted.shape[1]
-    columns = [f't+{h+1}' for h in range(horizon)]
-    with pd.HDFStore(paths['results'] / f'{run_id}.h5', mode='w') as store:
-        for key, values in [('Forecasted', predicted), ('Constrained', constrained),
-                            ('Observed', part['Y']), ('Persistence', part['persistence'])]:
-            store.put(key, pd.DataFrame(values, index=part['origins'], columns=columns))
     records = pd.DataFrame({
         'run_id': run_id, 'model': name, 'seed': config['seed'], 'physics': config['data']['physics'],
         'forecast_origin': np.repeat(part['origins'].to_numpy(), horizon),
@@ -131,14 +126,14 @@ def export_results(part, predicted, name, run_id, paths, config, thresholds):
     })
     for key, values in scenario_labels(part, thresholds).items():
         records[key] = values.reshape(-1)
-    records.to_csv(paths['results'] / f'{run_id}.csv', index=False)
+    records.to_csv(paths['results'] / 'predictions.csv', index=False)
     health_tables = []
     for variant, values in [('raw', predicted), ('constrained', constrained)]:
         health = forecast_health(part['Y'], values)
         health.insert(0, 'run_id', run_id)
         health['variant'] = variant
         health_tables.append(health)
-    pd.concat(health_tables, ignore_index=True).to_csv(paths['results'] / f'{run_id}_health.csv', index=False)
+    health = pd.concat(health_tables, ignore_index=True)
     scores = evaluate(part['Y'], predicted, part['persistence'], config['data']['p_nom_kw'], name)
     scores['variant'] = 'raw'
     limited = evaluate(part['Y'], constrained, part['persistence'], config['data']['p_nom_kw'], name)
@@ -154,7 +149,7 @@ def export_results(part, predicted, name, run_id, paths, config, thresholds):
     scores['above_capacity_fraction'] = [float(np.mean((part['persistence'] if row.model == 'Persistence' else
         constrained if row.variant == 'constrained' else predicted)[:, row.horizon-1] > capacity))
         if capacity is not None else np.nan for row in scores.itertuples()]
-    scores.to_csv(paths['results'] / f'{run_id}_metrics.csv', index=False)
+    scores.to_csv(paths['results'] / 'metrics.csv', index=False)
     fig, ax = plt.subplots()
     for (label, variant), group in scores.groupby(['model', 'variant'], sort=False):
         ax.plot(group['horizon'], group['RMSE'], marker='o', label=f'{label} ({variant})')
@@ -164,7 +159,7 @@ def export_results(part, predicted, name, run_id, paths, config, thresholds):
     fig.tight_layout()
     fig.savefig(paths['figures'] / f'{run_id}_rmse.png', dpi=180)
     plt.close(fig)
-    return scores
+    return scores, health
 
 
 def paired_bootstrap(delta_errors, resamples, seed, block_length):

@@ -86,10 +86,13 @@ def arm_name(model, physics):
     return ('PI-' if physics else '') + model
 
 
-def output_paths(config):
+def output_paths(config, run_id=None, study_dir=None):
     paths = {key: project_path(config['output_dir']) / key for key in ('models', 'figures', 'results')}
-    for path in paths.values():
-        path.mkdir(parents=True, exist_ok=True)
+    if run_id:
+        parent = project_path(study_dir) / 'runs' if study_dir else paths['results']
+        paths['results'] = parent / run_id
+    for key, path in paths.items():
+        path.mkdir(parents=True, exist_ok=key != 'results' or run_id is None)
     return paths
 
 

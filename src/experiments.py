@@ -87,19 +87,19 @@ def _prepare_study(config, arms, directory):
     return expected
 
 
-def _train_record(config, arm, model, seed, expected_partitions, run_id=None):
+def _train_record(config, arm, model, seed, expected_partitions, run_id=None, study_dir=None):
     from .train import run as train
-    result = train(arm_config(config, arm['subset'], model, seed), run_id=run_id)
+    result = train(arm_config(config, arm['subset'], model, seed),
+                   run_id=run_id, study_dir=study_dir)
     metadata_path = result['artifact'] / 'metadata.json'
     metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
     if metadata['partitions'] != expected_partitions:
         raise ValueError('Training partitions changed during the experiment.')
-    history = project_path(config['output_dir']) / 'results' / f"{result['run_id']}_history.json"
-    health = project_path(config['output_dir']) / 'results' / f"{result['run_id']}_validation_health.csv"
+    history = result['result_dir'] / 'history.json'
+    health = result['result_dir'] / 'validation_health.csv'
     return {'model': model, 'arm': arm['id'], 'seed': seed, 'subset': arm['subset'],
             'artifact': str(result['artifact']), 'training_run_id': result['run_id'],
-            'validation_mae': sum(row['MAE'] for row in metadata['validation_health'])
-                              / len(metadata['validation_health']),
+            'validation_mae': metadata['validation_mae'],
             'training_seconds': metadata['training_seconds'],
             'history': str(history), 'validation_health': str(health)}
 
@@ -184,11 +184,12 @@ def run(config=None, resume=None):
                    'command': state['source']['command'], 'commit': state['source']['commit'],
                    'dirty': state['source']['dirty'],
                    'effective_config': arm_config(candidate, arm['subset'], model, candidate['seed']),
-                   'log': str(project_path(candidate['output_dir']) / 'results' / f'{run_id}_train.log')}
+                   'log': str(directory / 'runs' / run_id / 'train.log')}
         state['attempts'].append(attempt)
         write_json(manifest, state)
         try:
-            result = _train_record(candidate, arm, model, candidate['seed'], partitions, run_id)
+            result = _train_record(candidate, arm, model, candidate['seed'],
+                                   partitions, run_id, directory)
             validate_source(state['source'])
             attempt.update(status='completed', artifact=result['artifact'])
         except (Exception, KeyboardInterrupt) as error:
@@ -216,8 +217,7 @@ def run(config=None, resume=None):
                 write_json(manifest, state)
         state['selected'] = _select(state['screening'], arms, screening_seed)
         state['status'] = 'selection_frozen'
-        write_json(directory / 'selection.json', {'selected': state['selected'], 'screening': state['screening'],
-                                                    'criterion': 'validation MAE for the fixed seed'})
+        state['selection_criterion'] = 'validation MAE for the fixed seed'
         write_json(manifest, state)
     for model in ('XGBoost', 'CNN_LSTM'):
         final_ids = ['nonpi_reference', state['selected'][model]]
@@ -238,7 +238,7 @@ def run(config=None, resume=None):
             state['attempts'].append(attempt)
             write_json(manifest, state)
             try:
-                prediction = predict(record['artifact'], run_id=prediction_id)
+                prediction = predict(record['artifact'], run_id=prediction_id, study_dir=directory)
                 attempt.update(status='completed', metadata=str(prediction['metadata_path']))
             except (Exception, KeyboardInterrupt) as error:
                 attempt.update(status='interrupted' if isinstance(error, KeyboardInterrupt) else 'failed',

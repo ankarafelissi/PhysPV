@@ -10,7 +10,7 @@ from datetime import datetime
 from .runtime import configure_runtime
 
 
-def run(model_dir, config=None, run_id=None):
+def run(model_dir, config=None, run_id=None, study_dir=None):
     configure_runtime()
     import joblib
     from .config import arm_name, data_contract, load_config, output_paths, validate_config
@@ -39,28 +39,30 @@ def run(model_dir, config=None, run_id=None):
     splits, _ = prepare_data(frame, config['data'], scalers=scalers)
     if saved.get('partitions') != partition_metadata(splits):
         raise ValueError('Evaluation origins or partitions changed since training.')
+    rung = arm_name(name, config['data']['physics'])
+    run_id = run_id or (datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '_' + rung + f'_s{config["seed"]}_predict')
+    paths = output_paths(config, run_id, study_dir)
     model = load_model(name, artifact)
     started = perf_counter()
     scaled = predict_scaled(model, name, splits['TEST']['X'])
     prediction_seconds = perf_counter() - started
     predicted = scalers['Y'].inverse_transform(scaled.reshape(-1, 1)).reshape(scaled.shape)
-    paths = output_paths(config)
-    rung = arm_name(name, config['data']['physics'])
-    run_id = run_id or (datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '_' + rung + f'_s{config["seed"]}_predict')
-    scores = export_results(splits['TEST'], predicted, rung, run_id, paths, config, saved['scenario_thresholds'])
-    (paths['results'] / f'{run_id}_metadata.json').write_text(json.dumps({
+    scores, health = export_results(splits['TEST'], predicted, rung, run_id, paths, config, saved['scenario_thresholds'])
+    (paths['results'] / 'metadata.json').write_text(json.dumps({
         'model_dir': str(artifact), 'model': name, 'arm': rung, 'config': config,
         'seed': config['seed'], 'run_id': run_id, 'training_run_id': saved['run_id'],
         'data_contract': data_contract(config['data']), 'partitions': saved['partitions'],
         'input': identity, 'environment': saved['environment'],
         'scenario_thresholds': saved['scenario_thresholds'], 'smoke': saved['smoke'],
         'samples': len(predicted),
+        'prediction_file': 'predictions.csv', 'metrics_file': 'metrics.csv',
+        'forecast_health': health.to_dict('records'),
         'prediction_seconds': prediction_seconds, 'training_seconds': saved.get('training_seconds'),
     }, indent=2), encoding='utf-8')
     print(scores.to_string(index=False))
-    print(f'Results: {paths["results"] / run_id}')
+    print(f'Results: {paths["results"]}')
     return {'run_id': run_id, 'scores': scores, 'predicted': predicted,
-            'metadata_path': paths['results'] / f'{run_id}_metadata.json'}
+            'metadata_path': paths['results'] / 'metadata.json'}
 
 
 def main():
