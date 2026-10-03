@@ -13,11 +13,11 @@ import numpy as np
 import yaml
 
 from src.config import data_contract, load_config
-from src.data import load_data, prepare_data
-from src.features import build_features
+from src.data import load_data, prepare_data, input_identity, partition_metadata
+from src.data import build_features
 from src.metrics import fit_scenario_thresholds
 from src.predict import run
-from src.provenance import input_identity, partition_metadata, environment_metadata
+from src.runtime import environment_metadata
 
 
 class PredictionTests(unittest.TestCase):

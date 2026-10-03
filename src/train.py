@@ -10,24 +10,18 @@ import numpy as np
 import yaml
 
 from .config import arm_name, data_contract, output_paths, validate_config, smoke_config
-from .data import load_data, prepare_data
-from .paths import project_path
-from .features import build_features
+from .data import load_data, prepare_data, build_features, input_identity, partition_metadata
 from .metrics import (export_training_curve, fit_scenario_thresholds,
                       forecast_health, require_healthy_forecasts)
-from .models import SUPPORTED_MODELS, load_model, predict_scaled, save_model, train_model
-from .provenance import environment_metadata, input_identity, partition_metadata
+from .models import load_model, predict_scaled, save_model, train_model
+from .runtime import environment_metadata, project_path
 
 
 def run(config, model_name=None, smoke=False, run_id=None):
     config = copy.deepcopy(config)
     name = model_name or config['model']
-    if name not in SUPPORTED_MODELS:
-        raise ValueError(f'Choose one of {SUPPORTED_MODELS}.')
     config['model'] = name
-    validate_config(config)
-    if smoke:
-        config = smoke_config(config)
+    config = smoke_config(config) if smoke else validate_config(config)
     is_smoke = smoke or config.get('smoke_study', False)
     rung = arm_name(name, config['data']['physics'])
     run_id = run_id or (datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '_' + rung + f'_s{config["seed"]}' + ('_smoke' if is_smoke else ''))
@@ -84,7 +78,6 @@ def run(config, model_name=None, smoke=False, run_id=None):
             'validation_target_end': str(splits['VAL']['target_times'][-1, -1]),
             'samples': sizes, 'smoke': is_smoke,
         }, indent=2), encoding='utf-8')
-        (artifact / 'config.yaml').write_text(yaml.safe_dump(config, sort_keys=False), encoding='utf-8')
         windows = splits['VAL']['X'][:16]
         np.testing.assert_allclose(predict_scaled(model, name, windows),
                                    predict_scaled(load_model(name, artifact), name, windows), rtol=1e-5, atol=1e-6)

@@ -106,9 +106,7 @@ def evaluate(observed, predicted, persistence, p_nom_kw, name='Forecaster'):
 
 def export_results(part, predicted, name, run_id, paths, config, thresholds):
     constrained = constrain_power(predicted, config['data'])
-    # The forecast head returns float32, which decimal text does not round-trip
-    # exactly. These CSVs are the report's source of truth, so widen them to float64
-    # and let read_study() verify stored errors exactly rather than within a bound.
+    # Widen float32 forecasts before calculating errors for CSV export.
     predicted = np.asarray(predicted, dtype=float)
     constrained = np.asarray(constrained, dtype=float)
     horizon = predicted.shape[1]

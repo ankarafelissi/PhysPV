@@ -25,7 +25,7 @@ def main():
         experiment(config)
         return
     if args.physics is not None:
-        from src.features import CANDIDATE_FEATURES
+        from src.data import CANDIDATE_FEATURES
         enabled = args.physics == 'on'
         config['data']['physics'] = enabled
         config['data']['candidate_subset'] = list(CANDIDATE_FEATURES) if enabled else []

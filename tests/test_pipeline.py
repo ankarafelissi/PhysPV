@@ -6,7 +6,7 @@ configure_runtime()
 import numpy as np
 import pandas as pd
 from src.data import load_data, prepare_data
-from src.features import build_features
+from src.data import build_features
 from src.metrics import evaluate
 from src.config import load_config
 

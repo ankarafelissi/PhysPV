@@ -8,7 +8,7 @@ import unittest
 from src.runtime import configure_runtime
 configure_runtime()
 from src.config import load_config, smoke_config, validate_study
-from src.paths import PROJECT_ROOT, project_path
+from src.runtime import PROJECT_ROOT, project_path
 
 
 class ConfigurationTests(unittest.TestCase):

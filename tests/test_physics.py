@@ -9,7 +9,7 @@ import pandas as pd
 
 from src.config import data_contract, load_config, validate_config
 from src.data import prepare_data
-from src.features import PHYSICS_FEATURES, build_features, feature_names, pv_power_features
+from src.data import PHYSICS_FEATURES, build_features, feature_names, pv_power_features
 from src.metrics import (constrain_power, evaluate, fit_scenario_thresholds,
                          paired_bootstrap, scenario_labels)
 

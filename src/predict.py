@@ -14,12 +14,10 @@ def run(model_dir, config=None, run_id=None):
     configure_runtime()
     import joblib
     from .config import arm_name, data_contract, load_config, output_paths, validate_config
-    from .data import load_data, prepare_data
-    from .paths import project_path
-    from .features import build_features
+    from .data import load_data, prepare_data, build_features, input_identity, partition_metadata
     from .metrics import export_results
     from .models import load_model, predict_scaled
-    from .provenance import input_identity, partition_metadata, environment_metadata
+    from .runtime import environment_metadata, project_path
 
     artifact = project_path(model_dir)
     saved = json.loads((artifact / 'metadata.json').read_text(encoding='utf-8'))

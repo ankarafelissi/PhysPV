@@ -4,8 +4,8 @@ import copy
 import numpy as np
 import yaml
 
-from .paths import project_path
-from .features import feature_names, validate_plant
+from .runtime import project_path
+from .data import PHYSICS_FEATURES, feature_names, validate_plant
 
 CONTRACT_VERSION = 2
 
@@ -66,7 +66,6 @@ def load_config(path):
 
 def arm_config(config, subset, model, seed):
     """Return a validated configuration for one model and feature subset."""
-    from .features import PHYSICS_FEATURES
     result = copy.deepcopy(config)
     result['data']['candidate_subset'] = list(subset)
     result['data']['physics'] = bool(set(subset).intersection(PHYSICS_FEATURES))
@@ -81,15 +80,6 @@ def data_contract(data):
                           **({'candidate_subset': data['candidate_subset']} if 'candidate_subset' in data else {}),
                           'effective_features': feature_names(data),
                           'max_rows': data.get('max_rows'), 'version': CONTRACT_VERSION})
-
-
-def comparison_contract(config):
-    """Ignore only the ablation switch, its injected columns, and model choice."""
-    contract = data_contract(config['data'])
-    contract.pop('physics')
-    contract.pop('effective_features')
-    return {**contract, 'data_path': str(project_path(config['data']['path']).resolve()),
-            'models': copy.deepcopy(config['models']), 'study': copy.deepcopy(config.get('study', {}))}
 
 
 def arm_name(model, physics):

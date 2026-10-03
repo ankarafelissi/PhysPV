@@ -26,7 +26,7 @@ def tune(config, state, manifest, fit):
     """Reconstruct completed trials on resume; preserve failures and attempt links."""
     import optuna
     from optuna.distributions import distribution_to_json, json_to_distribution
-    from .provenance import write_json
+    from .runtime import write_json
     settings = config['tuning']
     if type(settings['trials_per_model']) is not int or settings['trials_per_model'] < 1:
         raise ValueError('tuning.trials_per_model must be a positive integer.')

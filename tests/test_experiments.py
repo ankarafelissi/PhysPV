@@ -10,7 +10,7 @@ import pandas as pd
 from src.config import arm_config, data_contract, load_config
 from src.data import prepare_data
 from src.experiments import _arms, _select
-from src.features import CANDIDATE_FEATURES, build_features, feature_names
+from src.data import CANDIDATE_FEATURES, build_features, feature_names
 from src.metrics import evaluate
 
 

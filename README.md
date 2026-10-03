@@ -87,17 +87,15 @@ feature gain or better TEST generalization.
 ```text
 config/                 Experiment, plant and smoke configurations
 src/
-  data.py               Loading, chronological splits, windows and scaling
-  features.py           Calendar, irradiance and physics-derived features
+  data.py               Physics features, loading, chronological windows and scaling
   models/               CNN-LSTM and XGBoost implementations
   train.py              TRAIN/VAL fitting and model persistence
   predict.py            Saved-model TEST inference
   experiments.py        Feature screening and validation-only selection
   tuning.py             Bounded TPE search before parameter freezing
-  evaluation.py         Verified comparison tables and research summary
-  visualization.py      Figures generated from verified results
+  evaluation.py         Comparison tables, manifest summary and figures
   metrics.py            Metrics, constraints, health checks and bootstrap
-  provenance.py         Input-path, partition and runtime metadata
+  runtime.py            Runtime setup, project paths and JSON records
 data/raw/               Local source data
 data/processed/         Regenerated feature tables
 outputs/models/         Saved models and scalers

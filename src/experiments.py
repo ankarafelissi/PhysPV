@@ -2,14 +2,32 @@
 import argparse
 import copy
 import json
+import subprocess
+import sys
 from datetime import datetime
 from .config import arm_config
-from .provenance import write_json
-from .runtime import configure_runtime
+from .runtime import configure_runtime, project_path, write_json
 
 
-def _score(metadata):
-    return sum(row['MAE'] for row in metadata['validation_health']) / len(metadata['validation_health'])
+def source_record():
+    """Keep the command, Git state and readable source in the study manifest."""
+    def git(*args):
+        return subprocess.check_output(['git', *args], cwd=project_path('.'), text=True)
+    files = [project_path('main.py'), project_path('requirements.txt')]
+    files += sorted(project_path('src').rglob('*.py'))
+    files += sorted(project_path('config').glob('*.yaml'))
+    return {'commit': git('rev-parse', 'HEAD').strip(),
+            'dirty': bool(git('status', '--porcelain').strip()),
+            'diff': git('diff', 'HEAD', '--', 'src', 'config', 'main.py', 'requirements.txt'),
+            'files': {str(p.relative_to(project_path('.'))): p.read_text(encoding='utf-8')
+                      for p in files},
+            'command': subprocess.list2cmdline([sys.executable, *sys.argv])}
+
+
+def validate_source(saved):
+    current = source_record()
+    if current['commit'] != saved['commit'] or current['files'] != saved['files']:
+        raise ValueError('Source or Git commit changed; create a new study instead of resuming.')
 
 
 def _arms(config):
@@ -29,9 +47,8 @@ def _prepare_study(config, arms, directory):
     """Create TRAIN-only diagnostics and verify common forecast origins."""
     import numpy as np
     import pandas as pd
-    from .data import load_data, prepare_data
-    from .features import CANDIDATE_FEATURES, build_features
-    from .provenance import partition_metadata
+    from .data import (load_data, prepare_data, partition_metadata,
+                       CANDIDATE_FEATURES, build_features)
 
     full = arm_config(config, CANDIDATE_FEATURES, 'XGBoost', config['seed'])
     frame = build_features(load_data(full['data']), full['data'])
@@ -71,7 +88,6 @@ def _prepare_study(config, arms, directory):
 
 
 def _train_record(config, arm, model, seed, expected_partitions, run_id=None):
-    from .paths import project_path
     from .train import run as train
     result = train(arm_config(config, arm['subset'], model, seed), run_id=run_id)
     metadata_path = result['artifact'] / 'metadata.json'
@@ -82,7 +98,9 @@ def _train_record(config, arm, model, seed, expected_partitions, run_id=None):
     health = project_path(config['output_dir']) / 'results' / f"{result['run_id']}_validation_health.csv"
     return {'model': model, 'arm': arm['id'], 'seed': seed, 'subset': arm['subset'],
             'artifact': str(result['artifact']), 'training_run_id': result['run_id'],
-            'validation_mae': _score(metadata), 'training_seconds': metadata['training_seconds'],
+            'validation_mae': sum(row['MAE'] for row in metadata['validation_health'])
+                              / len(metadata['validation_health']),
+            'training_seconds': metadata['training_seconds'],
             'history': str(history), 'validation_health': str(health)}
 
 
@@ -102,13 +120,14 @@ def _select(screening, arms, seed):
     return selected
 
 
-def _run(config=None, resume=None):
+def run(config=None, resume=None):
+    """Tune on VAL, freeze parameters, screen features and evaluate TEST."""
+    config = copy.deepcopy(config)
     configure_runtime()
-    import tables  # noqa: F401
     from .config import validate_study
-    from .paths import project_path
     from .predict import run as predict
-    from .provenance import environment_metadata, input_identity, source_record, validate_source
+    from .runtime import environment_metadata
+    from .data import input_identity
 
     if resume:
         manifest = project_path(resume)
@@ -121,7 +140,6 @@ def _run(config=None, resume=None):
         config, arms, directory = state['config'], state['arms'], manifest.parent
         if state['environment'] != environment_metadata() or state['input'] != input_identity(config['data']):
             raise ValueError('Runtime environment or configured input path changed; resume is not comparable.')
-        partitions = state['partitions']
     else:
         validate_study(config['study'])
         arms = _arms(config)
@@ -245,11 +263,6 @@ def _run(config=None, resume=None):
     write_json(manifest, state)
     print(f'Completed: {manifest}', flush=True)
     return manifest
-
-
-def run(config=None, resume=None):
-    """Run the default tuning-then-feature workflow."""
-    return _run(copy.deepcopy(config), resume)
 
 
 def main():
