@@ -25,9 +25,21 @@ Tuning is a preparation step; the research question concerns physical features.
 - Keep the reference features, forecast origins and targets identical across arms.
 - Treat smoke runs as execution checks, never performance evidence.
 
-The candidate pool contains single-feature additions, selected combinations and the
-full physics set. XGBoost and CNN-LSTM may select different subsets. Selection never
-requires matching cross-model trends.
+The default path screens single-feature additions first. A single becomes a winner
+only when `100 * (1 - candidate_VAL_MAE / reference_VAL_MAE) > 0.5`, separately
+for each model. Rank winners by VAL MAE, with arm ID resolving ties. Try at most
+three pairs from the top three winners in ranked order; two winners permit one pair
+and fewer than two skip combinations. Then try exactly one predeclared replacement:
+replace EPOA/GHI/Hday with Pac/clear-sky index/solar elevation. Keep model parameters,
+seed and forecast origins fixed through every stage. Do not revisit HPO.
+
+Final selection compares the reference, winner singles, combinations and replacement
+on VAL MAE, preferring the reference on an exact tie, then fewer inputs and arm ID.
+Non-winning singles remain in the manifest but are excluded from final selection.
+The study stops with `selection_frozen`; TEST inference requires `--evaluate-test`.
+If the reference wins, evaluate it once and retain the no-improvement finding.
+XGBoost and CNN-LSTM may select different subsets. Selection never requires matching
+cross-model trends. Historical studies below used the previous PI-only selection rule.
 
 ## Metrics
 
@@ -242,3 +254,95 @@ new run without another TPE search:
 ```bash
 python main.py --feature-study --config outputs/results/20261003_015328_145601_features/frozen_config.yaml
 ```
+
+## Staged system-state and solar-feature study (3 October 2026)
+
+Study `20261003_175357_067013_features` completed with seed 11 on CPU. The user
+supplied latitude 55.6867, longitude 12.0985 and UTC timestamp timezone. A YAML
+indentation error was corrected before starting. TRAIN irradiance/solar alignment
+was checked; the coordinates were not independently surveyed. The chronological
+partitions retained 7,644 TRAIN, 2,185 VAL and 1,088 TEST origins.
+
+The unchanged 12-attempt-per-model TPE procedure selected the same parameter values
+as the initial study. CNN-LSTM used the current YAML's 120-epoch ceiling, rather
+than the separate 240-epoch follow-up budget. Parameters were frozen before all
+feature experiments. The 24 tuning fits, 18 reference/single-feature fits, one
+winner-combination fit, two replacement fits and three TEST predictions all
+completed: 48 attempts, zero failures or interruptions. Commands, dirty source
+snapshot/diff, effective configurations and artifact paths remain in the
+[existing manifest](../outputs/results/20261003_175357_067013_features/manifest.json).
+
+### VAL screening and selection
+
+The reference MAE was 0.430659 kW for XGBoost and 0.444413 kW for CNN-LSTM.
+The table reports percentage MAE change relative to each reference: negative
+values are improvements. Candidate eligibility required an improvement strictly
+greater than 0.5%.
+
+| Feature or experiment | XGBoost MAE change | CNN-LSTM MAE change |
+| --- | ---: | ---: |
+| Pac | +0.39% | +2.88% |
+| Pdc | +0.35% | +3.06% |
+| TempModule | +1.58% | +1.61% |
+| TempCell | +0.53% | +1.70% |
+| physics_residual | +0.39% | +2.65% |
+| performance_ratio | +0.28% | +10.18% |
+| clear_sky_index | -1.31% | +1.45% |
+| solar_elevation | -2.91% | +0.90% |
+| solar_elevation + clear_sky_index | -2.94% | Not eligible |
+| Physics replacement | -0.27% | +5.48% |
+
+Only solar elevation and clear-sky index qualified for XGBoost, permitting one
+winner pair. Their combination was selected with VAL MAE 0.417995 kW. Its gain
+over solar elevation alone (0.418130 kW) was only about 0.03%; this does not establish
+a meaningful synergy. CNN-LSTM had no qualifying singles, skipped combinations,
+and selected its reference. Replacement removed EPOA/GHI/Hday and inserted
+Pac/clear-sky index/solar elevation, retaining the common historical inputs.
+The full [VAL table](../outputs/results/20261003_175357_067013_features/validation_screening_summary.csv)
+retains all negative results.
+
+### Frozen TEST evaluation
+
+The study first stopped at `selection_frozen`. TEST was then opened through a
+separate `--resume ... --evaluate-test` command. Only the XGBoost reference,
+its frozen combination and the CNN-LSTM reference were evaluated; no rejected
+features were subsequently tested or reselected.
+
+| Model and selected inputs | MAE (kW) | RMSE (kW) | nRMSE (%) | R2 |
+| --- | ---: | ---: | ---: | ---: |
+| Persistence | 1.522309 | 2.061128 | 27.703330 | -0.794566 |
+| XGBoost reference | 0.379664 | 0.706911 | 9.501490 | 0.808325 |
+| XGBoost solar elevation + clear-sky index | 0.385183 | 0.723707 | 9.727251 | 0.799235 |
+| CNN-LSTM reference | 0.414687 | 0.763020 | 10.255641 | 0.776709 |
+
+The XGBoost combination's TEST MAE increased 1.45% and RMSE increased 2.38%.
+Its paired mean MAE difference was +0.005519 kW, with a 95% circular block
+bootstrap interval of [-0.007544, +0.019276] kW (2,000 resamples, 24-origin blocks).
+The interval includes zero: there is no demonstrated generalization improvement
+or statistically resolved degradation. Only the one-hour MAE improved (-2.71%);
+the remaining nine horizons worsened. The [TEST comparison](../outputs/results/20261003_175357_067013_features/model_comparison.csv)
+and [paired intervals](../outputs/results/20261003_175357_067013_features/feature_ablation.csv)
+preserve the quantitative results. CNN-LSTM's zero difference reflects selection
+of the same reference, not an independent PI improvement.
+
+### Interpretation and limits
+
+Solar geometry and clear-sky normalization helped XGBoost on VAL, but that gain
+did not transfer to TEST. System-state residual and performance ratio did not
+help either model on VAL; all tested additions and replacement harmed CNN-LSTM.
+These are model-, site-, period- and seed-specific findings, not a universal
+ranking of physical features.
+
+TRAIN Pac and measured power had Pearson correlation 0.999724. The residual
+standard deviation was only 0.038265 kW, supporting redundancy as one plausible
+explanation. The performance-ratio 95th percentile was 2.1308 for Pac >0.05 kW,
+versus 1.1770 for Pac >0.5 kW, showing that low denominators amplify variation.
+These descriptive thresholds were not used to retune the feature floors.
+The TRAIN statistics do not prove the cause of model degradation.
+
+Eight of ten CNN-LSTM feature fits reached the 120-epoch ceiling. Performance
+ratio stopped at 45 epochs and replacement at 39. Thus its negative feature
+results remain conditional on this budget; they are not a converged-capacity
+assessment and should not be directly compared with the earlier 240-epoch study.
+The Haurwitz clear-sky reference also omits site-specific aerosol and turbidity.
+No extra seeds, TEST-guided tuning or new model families were introduced.

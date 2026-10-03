@@ -11,6 +11,7 @@ def main():
     parser.add_argument('--smoke', action='store_true', help='At most 240 rows, PRE=2, H=1, one epoch / five trees')
     parser.add_argument('--feature-study', action='store_true',
                         help='Run the one-seed validation-selected feature comparison')
+    parser.add_argument('--evaluate-test', action='store_true', help='Evaluate TEST after the feature study selection')
     args = parser.parse_args()
     configure_runtime()
     from src.config import load_config
@@ -22,8 +23,10 @@ def main():
             parser.error('--feature-study controls both models and all feature arms; omit --model/--physics')
         if args.smoke:
             parser.error('Use python -m src.experiments --smoke for the workflow diagnostic')
-        experiment(config)
+        experiment(config, evaluate_test=args.evaluate_test)
         return
+    if args.evaluate_test:
+        parser.error('--evaluate-test requires --feature-study')
     if args.physics is not None:
         from src.data import CANDIDATE_FEATURES
         enabled = args.physics == 'on'

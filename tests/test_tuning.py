@@ -83,18 +83,67 @@ class TuningTests(unittest.TestCase):
                 patch('src.evaluation.report'):
             manifest = run(self.config)
             state = json.loads(manifest.read_text())
-            self.assertEqual(state['status'], 'completed')
-            self.assertEqual(fit.call_count, 20)
-            self.assertEqual(predict.call_count, 4)
+            self.assertEqual(state['status'], 'selection_frozen')
+            self.assertEqual(fit.call_count, 24)
+            predict.assert_not_called()
+            self.assertEqual(state['selected'], {m: 'nonpi_reference' for m in ('XGBoost', 'CNN_LSTM')})
             self.assertTrue(all(a['status'] == 'completed' for a in state['attempts']))
             for model in ('XGBoost', 'CNN_LSTM'):
                 frozen = state['config']['models'][model]
-                screened = [a for a in state['attempts'] if a['run_type'] == 'screening' and a['model'] == model]
+                screened = [a for a in state['attempts'] if a['run_type'] != 'tuning' and a['model'] == model]
                 self.assertTrue(all(a['effective_config']['models'][model] == frozen for a in screened))
             run(resume=manifest)
-            self.assertEqual(fit.call_count, 20)
-            self.assertEqual(predict.call_count, 4)
+            self.assertEqual(fit.call_count, 24)
+            predict.assert_not_called()
+            self.assertEqual(json.loads(manifest.read_text())['status'], 'selection_frozen')
+            run(resume=manifest, evaluate_test=True)
+            self.assertEqual(json.loads(manifest.read_text())['status'], 'completed')
+            self.assertEqual(fit.call_count, 24)
+            self.assertEqual(predict.call_count, 2)
+            run(resume=manifest, evaluate_test=True)
+            self.assertEqual(fit.call_count, 24)
+            self.assertEqual(predict.call_count, 2)
             changed = copy.deepcopy(self.config)
             changed['seed'] = 12
             with self.assertRaisesRegex(ValueError, 'Changed settings'):
                 run(changed, resume=manifest)
+
+    def test_winner_stage_failure_and_resume_preserve_attempts(self):
+        import json
+        self.config['output_dir'] = str(Path(self.temp.name) / 'outputs')
+        self.config['tuning']['enabled'] = False
+        failed = False
+        def simulated_fit(config, arm, model, seed, expected, run_id, study_dir):
+            nonlocal failed
+            if arm['category'] == 'combination' and not failed:
+                failed = True
+                raise RuntimeError('combination fixture failure')
+            value = {'add_pac': .98, 'add_pdc': .97, 'add_tm': .96}.get(arm['id'], 1.)
+            if arm['category'] == 'combination':
+                value = .95
+            if arm['category'] == 'replacement':
+                value = .94
+            return {'model': model, 'arm': arm['id'], 'seed': seed, 'subset': arm['subset'],
+                    'validation_mae': value, 'training_run_id': run_id,
+                    'artifact': str(Path(self.temp.name) / run_id), 'training_seconds': 0.}
+        with patch('src.experiments._prepare_study', return_value={'TEST': {'n_origins': 1088}}), \
+                patch('src.experiments._train_record', side_effect=simulated_fit) as fit, \
+                patch('src.predict.run') as predict:
+            with self.assertRaisesRegex(RuntimeError, 'combination fixture failure'):
+                run(self.config)
+            manifest = next((Path(self.config['output_dir']) / 'results').glob('*/manifest.json'))
+            state = json.loads(manifest.read_text())
+            self.assertEqual(state['status'], 'failed')
+            failed_attempt = state['attempts'][-1]['run_id']
+            self.assertEqual(state['attempts'][-1]['status'], 'failed')
+            run(resume=manifest)
+            state = json.loads(manifest.read_text())
+            self.assertEqual(fit.call_count, 27)
+            self.assertEqual(state['status'], 'selection_frozen')
+            self.assertEqual(state['selected'], {m: 'physics_replacement' for m in ('XGBoost', 'CNN_LSTM')})
+            for model in ('XGBoost', 'CNN_LSTM'):
+                self.assertEqual(state['winners'][model], ['add_tm', 'add_pdc', 'add_pac'])
+            self.assertEqual(sum(a['run_type'] == 'combination' and a['status'] == 'completed'
+                                 for a in state['attempts']), 6)
+            self.assertEqual(next(a for a in state['attempts'] if a['run_id'] == failed_attempt)['status'], 'failed')
+            predict.assert_not_called()

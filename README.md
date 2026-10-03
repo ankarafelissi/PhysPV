@@ -35,11 +35,14 @@ artifacts are excluded from Git.
 # Fast pipeline check
 python main.py --model all --smoke
 
-# Complete feature study
+# VAL-only feature study (TEST remains closed)
 python main.py --feature-study
 
 # Resume an interrupted study
 python -m src.experiments --resume outputs/results/STUDY_ID/manifest.json
+
+# Open TEST after reviewing the frozen VAL selection
+python -m src.experiments --resume outputs/results/STUDY_ID/manifest.json --evaluate-test
 
 # Evaluate one saved model
 python -m src.predict --model-dir outputs/models/RUN_ID
@@ -64,12 +67,26 @@ non-PI reference. No TEST scores enter tuning. Tree count, CNN epoch ceiling and
 early-stopping settings remain fixed. Failed attempts consume the bounded budget.
 Tuning is preparation, not a research objective.
 
-The selected parameters are frozen in `frozen_config.yaml` inside the study directory,
-then the feature study trains eight feature arms for each model. Every PI arm adds one or
-more of `Pac`, `Pdc`, `TempModule`, and `TempCell` to the same EPOA/GHI/Hday reference.
-Negative and mixed results remain valid.
+The selected parameters are frozen in `frozen_config.yaml` inside the study directory.
+Each model then screens eight single features against the EPOA/GHI/Hday reference:
+`Pac`, `Pdc`, `TempModule`, `TempCell`, `physics_residual`, `performance_ratio`,
+`clear_sky_index`, and `solar_elevation`. Only singles with a relative VAL MAE
+improvement strictly above 0.5% become winners. Up to three pairs among the top three
+winners are tested; fewer than three winners yield fewer combinations. One fixed
+replacement then replaces EPOA/GHI/Hday with Pac/clear-sky index/solar elevation.
+The reference, winner singles, combinations and replacement compete on VAL MAE.
+The reference may win; negative and mixed results remain valid.
 
-The default budget is at most 24 tuning attempts plus 16 feature fits. Extra seeds
+Before solar screening, fill verified station coordinates and timestamp
+timezone in `data.solar.site`, or supply verified elevation and clear-sky GHI columns.
+No location or timezone is guessed. NOAA solar geometry and Haurwitz clear-sky GHI
+use the existing NumPy dependency.
+The study stops at `selection_frozen` and writes `validation_screening_summary.csv`.
+Resume with `--evaluate-test` to evaluate only the reference and selected arm, without
+retraining. See [feature definitions](docs/data.md) for ratio floors and causal inputs.
+
+The default budget is at most 24 tuning attempts plus 26 feature fits (18 reference/
+single fits, up to six combinations and two replacement fits). Extra seeds
 are only used for final selected experiments when explicitly requested. Change the
 budget through `tuning` in `config/config.yaml`; disabling tuning reuses configured
 model parameters. The default search spaces are intentionally bounded:

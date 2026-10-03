@@ -5,9 +5,9 @@ import numpy as np
 import yaml
 
 from .runtime import project_path
-from .data import PHYSICS_FEATURES, feature_names, validate_plant
+from .data import DERIVED_FEATURES, feature_names, validate_plant
 
-CONTRACT_VERSION = 2
+CONTRACT_VERSION = 3
 
 
 def validate_config(config):
@@ -16,6 +16,15 @@ def validate_config(config):
             raise ValueError(f'Missing config section: {key}')
     data = config['data']
     feature_names(data)
+    floors = data.get('ratio_floors', {})
+    for key in ('pac_kw', 'clear_ghi_kw_m2'):
+        value = floors.get(key, .05 if key == 'pac_kw' else .02)
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not np.isfinite(value) or value <= 0):
+            raise ValueError(f'data.ratio_floors.{key} must be finite and positive.')
+    solar = data.get('solar', {})
+    if bool(solar.get('elevation_column')) != bool(solar.get('clear_ghi_column')):
+        raise ValueError('Solar input columns must specify both elevation and clear-sky GHI.')
     if data.get('correct_power') is not False:
         raise ValueError('data.correct_power must be false; observed targets cannot be replaced.')
     if data.get('target') != 'P_Solar[kW]':
@@ -68,7 +77,7 @@ def arm_config(config, subset, model, seed):
     """Return a validated configuration for one model and feature subset."""
     result = copy.deepcopy(config)
     result['data']['candidate_subset'] = list(subset)
-    result['data']['physics'] = bool(set(subset).intersection(PHYSICS_FEATURES))
+    result['data']['physics'] = bool(set(subset).intersection(DERIVED_FEATURES))
     result.update(model=model, seed=seed)
     return validate_config(result)
 
@@ -79,6 +88,7 @@ def data_contract(data):
     return copy.deepcopy({**{key: data[key] for key in keys},
                           **({'candidate_subset': data['candidate_subset']} if 'candidate_subset' in data else {}),
                           'effective_features': feature_names(data),
+                          'solar': data.get('solar'), 'ratio_floors': data.get('ratio_floors'),
                           'max_rows': data.get('max_rows'), 'version': CONTRACT_VERSION})
 
 

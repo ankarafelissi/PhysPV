@@ -34,7 +34,7 @@ def create_figures(state, comparison, screening, predictions, output_dir):
     for axis, model in zip(axes, ('XGBoost', 'CNN_LSTM')):
         selected = state['selected'][model]
         for arm, label, style in (('nonpi_reference', 'Non-PI', '--'),
-                                  (selected, 'Selected PI', '-')):
+                                  (selected, 'VAL-selected', '-')):
             values = comparison.query('model == @model and arm == @arm and horizon > 0')
             axis.plot(values.horizon, values.RMSE, style, color=COLORS[model], label=label)
         axis.plot(persistence.horizon, persistence.RMSE, color=COLORS['Persistence'], label='Persistence')
@@ -49,7 +49,7 @@ def create_figures(state, comparison, screening, predictions, output_dir):
         selected = state['selected'][model]
         observed = None
         for arm, label, style in (('nonpi_reference', 'Non-PI', '--'),
-                                  (selected, 'Selected PI', '-')):
+                                  (selected, 'VAL-selected', '-')):
             frame = predictions[model, arm, seed].query('horizon == 1').iloc[:48]
             time = frame['target_time']
             observed = frame
@@ -65,7 +65,7 @@ def create_figures(state, comparison, screening, predictions, output_dir):
     for axis, model in zip(axes, ('XGBoost', 'CNN_LSTM')):
         selected = state['selected'][model]
         for arm, label, style in (('nonpi_reference', 'Non-PI', '--'),
-                                  (selected, 'Selected PI', '-')):
+                                  (selected, 'VAL-selected', '-')):
             errors = np.sort(predictions[model, arm, seed].absolute_error.to_numpy())
             axis.plot(errors, np.linspace(0, 1, len(errors)), style,
                       color=COLORS[model], label=label)
@@ -94,6 +94,18 @@ def classify_result(mae_change_percent, rmse_change_percent, ci_low, ci_high):
     if ci_low <= 0 <= ci_high:
         return 'uncertain'
     return 'improvement' if mae_change_percent < 0 else 'degradation'
+
+
+def screening_summary(state):
+    """VAL-only table available while TEST is still closed."""
+    screen = pd.DataFrame(state['screening'])[['model', 'arm', 'validation_mae']].copy()
+    references = screen[screen.arm == 'nonpi_reference'].set_index('model')['validation_mae']
+    screen['delta_vs_reference'] = [row.validation_mae - references[row.model] for row in screen.itertuples()]
+    screen['improvement_percent'] = [100 * (1 - row.validation_mae / references[row.model])
+                                     if references[row.model] > 0 else np.nan for row in screen.itertuples()]
+    screen['single_winner'] = [row.arm in state.get('winners', {}).get(row.model, []) for row in screen.itertuples()]
+    screen['selected'] = [state['selected'].get(row.model) == row.arm for row in screen.itertuples()]
+    return screen
 
 
 def report(directory, state):
@@ -146,13 +158,7 @@ def report(directory, state):
             ablations.append({'model': model, 'selected_arm': selected, 'horizon': horizon, **interval})
     ablation = pd.DataFrame(ablations)
     ablation.to_csv(directory / 'feature_ablation.csv', index=False)
-    screen = pd.DataFrame(state['screening'])
-    screen_summary = screen[['model', 'arm', 'validation_mae']].copy()
-    references = screen_summary[screen_summary.arm == 'nonpi_reference'].set_index('model')['validation_mae']
-    screen_summary['delta_vs_reference'] = [row['validation_mae'] - references[row['model']]
-                                            for _, row in screen_summary.iterrows()]
-    screen_summary['selected'] = [state['selected'].get(row['model']) == row['arm']
-                                  for _, row in screen_summary.iterrows()]
+    screen_summary = screening_summary(state)
     screen_summary.to_csv(directory / 'validation_screening_summary.csv', index=False)
 
     from .runtime import project_path
@@ -174,7 +180,8 @@ def report(directory, state):
                             'classification': classify_result(mae_percent, rmse_percent,
                                                               delta.ci_low, delta.ci_high)})
     consistent = len(set(signs)) == 1
-    direction = 'improvement' if consistent and signs[0] < 0 else 'degradation' if consistent else 'mixed'
+    direction = ('no_change' if consistent and signs[0] == 0 else
+                 'improvement' if consistent and signs[0] < 0 else 'degradation' if consistent else 'mixed')
     # Machine-readable conclusions belong in the existing manifest, not a per-run Markdown report.
     state['summary'] = {'cross_model_mae_trend': direction, 'seed': config['seed'],
                         'smoke_diagnostic_only': bool(config.get('smoke_study')),

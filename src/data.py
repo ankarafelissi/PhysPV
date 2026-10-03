@@ -6,9 +6,12 @@ from .runtime import project_path
 
 
 PHYSICS_FEATURES = ('Pac', 'Pdc', 'TempModule', 'TempCell')
-RESERVED_PHYSICS = (*PHYSICS_FEATURES, 'TempModule_RP')
+STATE_FEATURES = ('physics_residual', 'performance_ratio')
+SOLAR_FEATURES = ('clear_sky_index', 'solar_elevation', 'solar_zenith')
+DERIVED_FEATURES = (*PHYSICS_FEATURES, *STATE_FEATURES, *SOLAR_FEATURES)
+RESERVED_PHYSICS = (*DERIVED_FEATURES, 'TempModule_RP')
 PHYSICAL_INPUTS = ('POA Irr[kW1m2]', 'TEMPERATURE[degC]', 'WIND_SPEED[m1s]')
-CANDIDATE_FEATURES = ('POA Irr[kW1m2]', 'GHI[kW1m2]', *PHYSICS_FEATURES, 'HoursOfDay')
+CANDIDATE_FEATURES = ('POA Irr[kW1m2]', 'GHI[kW1m2]', *DERIVED_FEATURES, 'HoursOfDay')
 
 
 def feature_names(config):
@@ -28,7 +31,7 @@ def feature_names(config):
                 or not set(subset).issubset(CANDIDATE_FEATURES)
                 or set(base).intersection(CANDIDATE_FEATURES)):
             raise ValueError('candidate_subset must contain unique supported candidates, separate from common features.')
-        if config['physics'] != bool(set(subset).intersection(PHYSICS_FEATURES)):
+        if config['physics'] != bool(set(subset).intersection(DERIVED_FEATURES)):
             raise ValueError('data.physics must match the presence of derived physical candidates.')
         return list(base) + [name for name in CANDIDATE_FEATURES if name in subset]
     return base + list(PHYSICS_FEATURES) if config['physics'] else list(base)
@@ -106,6 +109,62 @@ def pv_power_features(frame, plant):
     return pd.DataFrame(values, index=frame.index, columns=PHYSICS_FEATURES)
 
 
+def safe_ratio(numerator, denominator, minimum):
+    """Zero below the fixed denominator floor; preserve missing observations."""
+    if not np.isfinite(minimum) or minimum <= 0:
+        raise ValueError('Ratio denominator floors must be finite and positive.')
+    numerator, denominator = np.asarray(numerator, float), np.asarray(denominator, float)
+    values = np.zeros_like(numerator)
+    np.divide(numerator, denominator, out=values, where=denominator > minimum)
+    values[~np.isfinite(numerator) | ~np.isfinite(denominator)] = np.nan
+    return values
+
+
+def solar_features(frame, config):
+    """Verified columns or NOAA geometry with a fixed Haurwitz clear-sky model."""
+    settings = config.get('solar', {})
+    if settings.get('elevation_column') and settings.get('clear_ghi_column'):
+        elevation = frame[settings['elevation_column']].to_numpy(float)
+        clear = frame[settings['clear_ghi_column']].to_numpy(float)
+    else:
+        site = settings.get('site') or {}
+        for key, low, high in (('latitude', -90, 90), ('longitude', -180, 180)):
+            value = site.get(key)
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not np.isfinite(value) or not low <= value <= high):
+                raise ValueError(f'data.solar.site.{key} requires verified station metadata.')
+        if not site.get('timezone'):
+            raise ValueError('data.solar.site.timezone must identify the timestamp timezone.')
+        times = frame.index
+        times = times.tz_localize(site['timezone']) if times.tz is None else times.tz_convert(site['timezone'])
+        times = times.tz_convert('UTC')
+        hours = np.asarray(times.hour + times.minute / 60 + times.second / 3600, float)
+        # NOAA fractional-year approximation, evaluated in UTC (timezone offset zero).
+        days = np.where(times.is_leap_year, 366, 365)
+        gamma = 2 * np.pi / days * (np.asarray(times.dayofyear) - 1 + (hours - 12) / 24)
+        equation = 229.18 * (.000075 + .001868 * np.cos(gamma) - .032077 * np.sin(gamma)
+                             - .014615 * np.cos(2 * gamma) - .040849 * np.sin(2 * gamma))
+        declination = (.006918 - .399912 * np.cos(gamma) + .070257 * np.sin(gamma)
+                       - .006758 * np.cos(2 * gamma) + .000907 * np.sin(2 * gamma)
+                       - .002697 * np.cos(3 * gamma) + .00148 * np.sin(3 * gamma))
+        hour_angle = np.deg2rad((hours * 60 + equation + 4 * site['longitude']) / 4 - 180)
+        latitude = np.deg2rad(site['latitude'])
+        cosine = (np.sin(latitude) * np.sin(declination)
+                  + np.cos(latitude) * np.cos(declination) * np.cos(hour_angle))
+        elevation = 90 - np.rad2deg(np.arccos(np.clip(cosine, -1, 1)))
+        # Haurwitz: GHI_clear = 1098*cos(zenith)*exp(-0.059/cos(zenith)), W/m2.
+        clear = np.zeros(len(frame))
+        daylight = cosine > 0
+        clear[daylight] = 1.098 * cosine[daylight] * np.exp(-.059 / cosine[daylight])
+    if np.any(np.isfinite(clear) & (clear < 0)):
+        raise ValueError('Clear-sky GHI must be nonnegative and use kW/m2.')
+    return pd.DataFrame({
+        'clear_sky_index': safe_ratio(frame['GHI[kW1m2]'], clear,
+                                     config.get('ratio_floors', {}).get('clear_ghi_kw_m2', .02)),
+        'solar_elevation': elevation, 'solar_zenith': 90 - elevation,
+    }, index=frame.index)
+
+
 def build_features(frame, config):
     """Build both ablation arms on a common physical-input validity mask."""
     names = feature_names(config)
@@ -128,12 +187,24 @@ def build_features(frame, config):
         if name in names:
             rolling = result[column].rolling(config['horizon'])
             result[name] = rolling.mean() if operation == 'mean' else rolling.std(ddof=0)
-    selected_physics = set(names).intersection(PHYSICS_FEATURES)
+    derived = physical.copy()
+    if set(names).intersection(STATE_FEATURES):
+        derived['physics_residual'] = result[config['target']] - physical['Pac']
+        derived['performance_ratio'] = safe_ratio(result[config['target']], physical['Pac'],
+                                                  config.get('ratio_floors', {}).get('pac_kw', .05))
+    solar = config.get('solar', {})
+    solar_ready = ((solar.get('site') or {}).get('latitude') is not None
+                   or bool(solar.get('elevation_column') and solar.get('clear_ghi_column')))
+    if set(names).intersection(SOLAR_FEATURES) or ('candidate_subset' in config and solar_ready):
+        sun = solar_features(frame, config)
+        derived = pd.concat([derived, sun], axis=1)
+        result.attrs['eligible_rows'] &= np.isfinite(sun.to_numpy()).all(axis=1)
+    selected_physics = set(names).intersection(DERIVED_FEATURES)
     if selected_physics:
-        for name in PHYSICS_FEATURES:
+        for name in DERIVED_FEATURES:
             if name not in selected_physics:
                 continue
-            result[name] = physical[name]
+            result[name] = derived[name]
     if set(result.columns).intersection(RESERVED_PHYSICS) != selected_physics:
         raise ValueError('Physics feature invariant violated.')
     return result

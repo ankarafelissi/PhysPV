@@ -2,6 +2,8 @@
 import argparse
 import copy
 import json
+import itertools
+import math
 import subprocess
 import sys
 from datetime import datetime
@@ -33,13 +35,60 @@ def validate_source(saved):
 def _arms(config):
     reference = config['experiment']['reference_features']
     arms = [{'id': 'nonpi_reference', 'subset': reference, 'category': 'reference'}]
+    settings = config['experiment']
+    threshold = settings.get('min_improvement_percent', .5)
+    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not math.isfinite(threshold) or threshold < 0:
+        raise ValueError('min_improvement_percent must be finite and nonnegative.')
+    if type(settings.get('max_combinations', 3)) is not int or not 2 <= settings.get('max_combinations', 3) <= 3:
+        raise ValueError('max_combinations must be 2 or 3.')
     for item in config['experiment']['physics_candidates']:
+        if len(item['add']) != 1:
+            raise ValueError('Initial screening requires single-feature candidates.')
         subset = reference + item['add']
         if len(subset) != len(set(subset)):
             raise ValueError(f"Candidate {item['id']} duplicates a reference feature.")
-        arms.append({'id': item['id'], 'subset': subset, 'category': 'physics'})
+        arms.append({'id': item['id'], 'subset': subset, 'category': 'single'})
     if len({arm['id'] for arm in arms}) != len(arms):
         raise ValueError('Experiment arm identifiers must be unique.')
+    return arms
+
+
+def _winners(screening, arms, model, seed, threshold):
+    model_rows = [row for row in screening if row['model'] == model]
+    rows = {row['arm']: row for row in model_rows}
+    if len(rows) != len(model_rows):
+        raise ValueError('Every screening arm requires the configured seed exactly once.')
+    for arm in arms:
+        if arm['category'] not in ('reference', 'single'):
+            continue
+        row = rows.get(arm['id'])
+        if row is None or row['seed'] != seed or not math.isfinite(row['validation_mae']):
+            raise ValueError('Every screening arm requires finite MAE and the configured seed exactly once.')
+    baseline = rows['nonpi_reference']['validation_mae']
+    if baseline <= 0:
+        return []
+    return sorted([arm for arm in arms if arm['category'] == 'single'
+                   and rows[arm['id']]['validation_mae'] < baseline * (1 - threshold / 100)],
+                  key=lambda arm: (rows[arm['id']]['validation_mae'], arm['id']))
+
+
+def _followup_arms(config, winners, model):
+    """Predeclared ranking: at most three pairs of the top three winners."""
+    reference = config['experiment']['reference_features']
+    names = [next(name for name in arm['subset'] if name not in reference) for arm in winners[:3]]
+    combinations = list(itertools.combinations(names, 2))
+    arms = [{'id': 'combine_' + '_'.join(group), 'subset': reference + list(group),
+             'category': 'combination', 'model': model}
+            for group in combinations[:config['experiment'].get('max_combinations', 3)]]
+    replacement = config['experiment']['physics_replacement']
+    remove, add = replacement['remove'], replacement['add']
+    if not remove or not set(remove).issubset(reference):
+        raise ValueError('physics_replacement.remove must identify reference features.')
+    subset = [name for name in reference if name not in remove] + add
+    if not add or len(subset) != len(set(subset)) or subset == reference:
+        raise ValueError('physics_replacement must provide a distinct unique subset.')
+    arms.append({'id': 'physics_replacement', 'subset': subset,
+                 'category': 'replacement', 'model': model})
     return arms
 
 
@@ -105,23 +154,25 @@ def _train_record(config, arm, model, seed, expected_partitions, run_id=None, st
 
 
 def _select(screening, arms, seed):
-    """Choose the lowest validation-MAE physics arm for each model."""
+    """Choose lowest VAL MAE, including the reference when physics does not help."""
     selected = {}
     for model in ('XGBoost', 'CNN_LSTM'):
         ranked = []
         for arm in arms:
-            if arm['category'] != 'physics':
+            if arm.get('model', model) != model:
                 continue
             rows = [row for row in screening if row['model'] == model and row['arm'] == arm['id']]
             if len(rows) != 1 or rows[0]['seed'] != seed:
                 raise ValueError('Every screening arm requires the configured seed exactly once.')
-            ranked.append((rows[0]['validation_mae'], len(arm['subset']), arm['id']))
-        selected[model] = min(ranked)[2]
+            if not math.isfinite(rows[0]['validation_mae']):
+                raise ValueError('Selection requires finite validation MAE.')
+            ranked.append((rows[0]['validation_mae'], arm['category'] != 'reference', len(arm['subset']), arm['id']))
+        selected[model] = min(ranked)[3]
     return selected
 
 
-def run(config=None, resume=None):
-    """Tune on VAL, freeze parameters, screen features and evaluate TEST."""
+def run(config=None, resume=None, evaluate_test=False):
+    """Freeze HPO, stage VAL experiments, and keep TEST behind an explicit flag."""
     config = copy.deepcopy(config)
     configure_runtime()
     from .config import validate_study
@@ -143,6 +194,9 @@ def run(config=None, resume=None):
     else:
         validate_study(config['study'])
         arms = _arms(config)
+        for model in ('XGBoost', 'CNN_LSTM'):
+            for arm in _followup_arms(config, [], model):
+                arm_config(config, arm['subset'], model, config['seed'])
         study_id = datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '_features'
         directory = project_path(config['output_dir']) / 'results' / study_id
         directory.mkdir(parents=True)
@@ -166,7 +220,8 @@ def run(config=None, resume=None):
             raise
         write_json(manifest, state)
     partitions = state['partitions']
-    state['status'] = 'started'
+    if state['selected'] is None or (evaluate_test and state['status'] != 'completed'):
+        state['status'] = 'started'
     for attempt in state.get('attempts', []):
         if attempt['status'] == 'started':
             attempt.update(status='interrupted', error='Previous process ended before completion.')
@@ -177,6 +232,7 @@ def run(config=None, resume=None):
     write_json(manifest, state)
 
     def fit(candidate, arm, model, run_type):
+        validate_source(state['source'])
         run_id = (datetime.now().strftime('%Y%m%d_%H%M%S_%f')
                   + f'_{model}_{run_type}_{arm["id"]}_s{candidate["seed"]}')
         attempt = {'run_id': run_id, 'run_type': run_type, 'model': model,
@@ -190,6 +246,8 @@ def run(config=None, resume=None):
         try:
             result = _train_record(candidate, arm, model, candidate['seed'],
                                    partitions, run_id, directory)
+            if not math.isfinite(result['validation_mae']):
+                raise ValueError('Training produced non-finite validation MAE.')
             validate_source(state['source'])
             attempt.update(status='completed', artifact=result['artifact'])
         except (Exception, KeyboardInterrupt) as error:
@@ -204,26 +262,56 @@ def run(config=None, resume=None):
     if config.get('tuning', {}).get('enabled') and not state.get('parameters_frozen'):
         from .tuning import tune
         tune(config, state, manifest, fit)
+    if not state.get('parameters_frozen'):
+        import yaml
+        state['parameters_frozen'] = True
+        manifest.with_name('frozen_config.yaml').write_text(
+            yaml.safe_dump(state['config'], sort_keys=False), encoding='utf-8')
+        write_json(manifest, state)
     config = state['config']
     validate_study(config['study'])
     screening_seed = config['seed']
     if state['selected'] is None:
         for model in ('XGBoost', 'CNN_LSTM'):
             for arm in arms:
+                if arm['category'] not in ('reference', 'single'):
+                    continue
                 if any(row['model'] == model and row['arm'] == arm['id'] for row in state['screening']):
                     continue
                 print(f"SCREEN {model} {arm['id']} seed={screening_seed}", flush=True)
                 state['screening'].append(fit(config, arm, model, 'screening'))
                 write_json(manifest, state)
-        state['selected'] = _select(state['screening'], arms, screening_seed)
+        eligible = []
+        for model in ('XGBoost', 'CNN_LSTM'):
+            winners = _winners(state['screening'], arms, model, screening_seed,
+                               config['experiment'].get('min_improvement_percent', .5))
+            state.setdefault('winners', {})[model] = [arm['id'] for arm in winners]
+            planned = _followup_arms(config, winners, model)
+            for arm in planned:
+                if not any(item['id'] == arm['id'] and item.get('model') == model for item in arms):
+                    arms.append(arm)
+            state['arms'] = arms
+            write_json(manifest, state)
+            for arm in planned:
+                if any(row['model'] == model and row['arm'] == arm['id'] for row in state['screening']):
+                    continue
+                state['screening'].append(fit(config, arm, model, arm['category']))
+                write_json(manifest, state)
+            eligible += [{**arm, 'model': model} for arm in [arms[0], *winners, *planned]]
+        state['selected'] = _select(state['screening'], eligible, screening_seed)
         state['status'] = 'selection_frozen'
         state['selection_criterion'] = 'validation MAE for the fixed seed'
         write_json(manifest, state)
+    from .evaluation import screening_summary
+    screening_summary(state).to_csv(directory / 'validation_screening_summary.csv', index=False)
+    if not evaluate_test:
+        print(f'VAL selection frozen; TEST remains closed: {manifest}', flush=True)
+        return manifest
     for model in ('XGBoost', 'CNN_LSTM'):
-        final_ids = ['nonpi_reference', state['selected'][model]]
+        final_ids = list(dict.fromkeys(['nonpi_reference', state['selected'][model]]))
         for arm_id in final_ids:
             validate_source(state['source'])
-            arm = next(item for item in arms if item['id'] == arm_id)
+            arm = next(item for item in arms if item['id'] == arm_id and item.get('model', model) == model)
             if any(row['model'] == model and row['arm'] == arm_id for row in state['final']):
                 continue
             existing = next(row for row in state['screening']
@@ -270,6 +358,7 @@ def main():
     parser.add_argument('--config', default='config/config.yaml')
     parser.add_argument('--resume')
     parser.add_argument('--smoke', action='store_true')
+    parser.add_argument('--evaluate-test', action='store_true', help='Open TEST after VAL selection is frozen')
     args = parser.parse_args()
     configure_runtime()
     from .config import load_config
@@ -280,7 +369,7 @@ def main():
         from .config import smoke_config
         config = smoke_config(config)
         config['experiment']['physics_candidates'] = config['experiment']['physics_candidates'][:1]
-    run(config, args.resume)
+    run(config, args.resume, evaluate_test=args.evaluate_test)
 
 
 if __name__ == '__main__':

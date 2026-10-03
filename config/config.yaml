@@ -23,6 +23,16 @@ data:
   correct_power: false
   physics: false
   candidate_subset: []
+  ratio_floors:
+    pac_kw: 0.05
+    clear_ghi_kw_m2: 0.02
+  solar:
+    # SOLETE / SYSLAB, DTU Risø, Roskilde, Denmark
+    site:
+      latitude: 55.6867
+      longitude: 12.0985
+      timezone: UTC
+
   p_nom_kw: 7.44
   plant_path: config/plant.yaml
   constraints:
@@ -70,6 +80,8 @@ study:
 
 experiment:
   reference_features: ['POA Irr[kW1m2]', 'GHI[kW1m2]', HoursOfDay]
+  min_improvement_percent: 0.5
+  max_combinations: 3
   physics_candidates:
     - id: add_pac
       add: [Pac]
@@ -79,9 +91,14 @@ experiment:
       add: [TempModule]
     - id: add_tc
       add: [TempCell]
-    - id: add_pac_tc
-      add: [Pac, TempCell]
-    - id: add_pdc_tc
-      add: [Pdc, TempCell]
-    - id: add_all_physics
-      add: [Pac, Pdc, TempModule, TempCell]
+    - id: add_physics_residual
+      add: [physics_residual]
+    - id: add_performance_ratio
+      add: [performance_ratio]
+    - id: add_clear_sky_index
+      add: [clear_sky_index]
+    - id: add_solar_elevation
+      add: [solar_elevation]
+  physics_replacement:
+    remove: ['POA Irr[kW1m2]', 'GHI[kW1m2]', HoursOfDay]
+    add: [Pac, clear_sky_index, solar_elevation]
