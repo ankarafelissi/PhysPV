@@ -105,9 +105,9 @@ be recorded here after execution; TEST stays closed until all configurations fre
 Study `20261004_163215_553398_physics_tpe`; fixed seed-11 budget of 320 attempts.
 [Manifest](../outputs/results/20261004_163215_553398_physics_tpe/manifest.json),
 [trial table](../outputs/results/20261004_163215_553398_physics_tpe/tuning_results.csv).
-Status: **started**, checked 2026-10-04 17:13:51 local.
-Training attempts: 14 completed, 0 failed,
-0 interrupted, 1 currently started.
+Status: **failed**, checked 2026-10-04 17:16:51 local.
+Training attempts: 14 completed, 1 failed,
+0 interrupted, 0 currently started.
 TEST evaluations: 0/8. TRAIN/VAL/TEST common origins:
 91,951 / 26,265 / 13,103. The TRAIN-fitted Pearson pool matches the reference's
 named humidity/GHI/POA/Pac/Pdc/TempModule/TempCell list. Correction changed
@@ -115,7 +115,8 @@ named humidity/GHI/POA/Pac/Pdc/TempModule/TempCell list. Correction changed
 Compilation, 45 unit tests and the 8-fit/8-prediction smoke passed before launch.
 Smoke outputs are execution diagnostics only. Source/config remain frozen.
 
-Final TEST results remain pending. No result ranking is inferred during search.
+Execution ended with status failed: [WinError 5] Access is denied: 'C:\\Users\\felix\\Github\\pv\\outputs\\results\\20261004_163215_553398_physics_tpe\\manifest.tmp' -> 'C:\\Users\\felix\\Github\\pv\\outputs\\results\\20261004_163215_553398_physics_tpe\\manifest.json'.
+Failure history is preserved; no final result or budget extension is fabricated.
 
 ## Legacy hourly experiment (4 October 2026)
 
