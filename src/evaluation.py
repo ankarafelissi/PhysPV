@@ -1,88 +1,13 @@
-"""Create verified result tables from a completed one-seed experiment."""
+"""Four-space comparison of independently optimized frozen forecasters."""
 import argparse
 import json
 from pathlib import Path
-
 import matplotlib.pyplot as plt
-
 import numpy as np
 import pandas as pd
-
+from .data import SPACE_NAMES
 from .metrics import paired_bootstrap
-
-
-COLORS = {'Persistence': '#777777', 'XGBoost': '#37799b', 'CNN_LSTM': '#b1794d'}
-
-
-def _save(figure, directory, name):
-    figure.tight_layout()
-    for extension in ('png', 'svg', 'pdf'):
-        figure.savefig(directory / f'{name}.{extension}', dpi=300, bbox_inches='tight')
-    plt.close(figure)
-
-
-def create_figures(state, comparison, screening, predictions, output_dir):
-    """Export the four figures used to inspect the frozen TEST comparison."""
-    output = Path(output_dir) / state['study_id']
-    output.mkdir(parents=True, exist_ok=True)
-    plt.rcParams.update({'font.size': 8, 'axes.spines.top': False,
-                         'axes.spines.right': False, 'legend.frameon': False,
-                         'svg.fonttype': 'none', 'pdf.fonttype': 42})
-
-    figure, axes = plt.subplots(1, 2, figsize=(7.2, 3), sharey=True)
-    persistence = comparison.query('model == "Persistence" and horizon > 0')
-    for axis, model in zip(axes, ('XGBoost', 'CNN_LSTM')):
-        selected = state['selected'][model]
-        for arm, label, style in (('nonpi_reference', 'Non-PI', '--'),
-                                  (selected, 'VAL-selected', '-')):
-            values = comparison.query('model == @model and arm == @arm and horizon > 0')
-            axis.plot(values.horizon, values.RMSE, style, color=COLORS[model], label=label)
-        axis.plot(persistence.horizon, persistence.RMSE, color=COLORS['Persistence'], label='Persistence')
-        axis.set(title=model, xlabel='Forecast horizon')
-        axis.legend()
-    axes[0].set_ylabel('RMSE (kW)')
-    _save(figure, output, 'forecast_horizon_error')
-
-    figure, axes = plt.subplots(2, 1, figsize=(7.2, 5), sharex=True)
-    seed = state['config']['seed']
-    for axis, model in zip(axes, ('XGBoost', 'CNN_LSTM')):
-        selected = state['selected'][model]
-        observed = None
-        for arm, label, style in (('nonpi_reference', 'Non-PI', '--'),
-                                  (selected, 'VAL-selected', '-')):
-            frame = predictions[model, arm, seed].query('horizon == 1').iloc[:48]
-            time = frame['target_time']
-            observed = frame
-            axis.plot(time, frame.predicted_raw, style, color=COLORS[model], label=label)
-        axis.plot(observed.target_time, observed.observed, color='#202020', label='Observed')
-        axis.plot(observed.target_time, observed.persistence, color=COLORS['Persistence'], label='Persistence')
-        axis.set(title=model, ylabel='Power (kW)')
-        axis.legend(ncol=4)
-    axes[-1].tick_params(axis='x', rotation=25)
-    _save(figure, output, 'prediction_curves')
-
-    figure, axes = plt.subplots(1, 2, figsize=(7.2, 3), sharey=True)
-    for axis, model in zip(axes, ('XGBoost', 'CNN_LSTM')):
-        selected = state['selected'][model]
-        for arm, label, style in (('nonpi_reference', 'Non-PI', '--'),
-                                  (selected, 'VAL-selected', '-')):
-            errors = np.sort(predictions[model, arm, seed].absolute_error.to_numpy())
-            axis.plot(errors, np.linspace(0, 1, len(errors)), style,
-                      color=COLORS[model], label=label)
-        axis.set(title=model, xlabel='Absolute error (kW)')
-        axis.legend()
-    axes[0].set_ylabel('Empirical probability')
-    _save(figure, output, 'error_distribution')
-
-    figure, axes = plt.subplots(1, 2, figsize=(7.2, 3.8), sharex=True)
-    for axis, model in zip(axes, ('XGBoost', 'CNN_LSTM')):
-        values = screening.query('model == @model and arm != "nonpi_reference"')
-        positions = np.arange(len(values))
-        axis.barh(positions, values.delta_vs_reference, color=COLORS[model])
-        axis.set(yticks=positions, yticklabels=values.arm, title=model,
-                 xlabel='Validation MAE change (kW)')
-        axis.axvline(0, color='#555555', linewidth=.7)
-    _save(figure, output, 'feature_ablation')
+from .runtime import project_path, write_json
 
 
 def classify_result(mae_change_percent, rmse_change_percent, ci_low, ci_high):
@@ -97,97 +22,124 @@ def classify_result(mae_change_percent, rmse_change_percent, ci_low, ci_high):
 
 
 def screening_summary(state):
-    """VAL-only table available while TEST is still closed."""
-    screen = pd.DataFrame(state['screening'])[['model', 'arm', 'validation_mae']].copy()
-    references = screen[screen.arm == 'nonpi_reference'].set_index('model')['validation_mae']
-    screen['delta_vs_reference'] = [row.validation_mae - references[row.model] for row in screen.itertuples()]
-    screen['improvement_percent'] = [100 * (1 - row.validation_mae / references[row.model])
-                                     if references[row.model] > 0 else np.nan for row in screen.itertuples()]
-    screen['single_winner'] = [row.arm in state.get('winners', {}).get(row.model, []) for row in screen.itertuples()]
-    screen['selected'] = [state['selected'].get(row.model) == row.arm for row in screen.itertuples()]
-    return screen
+    rows = []
+    for result in state['screening']:
+        record = state['tuning'][result['model'] + '/' + result['arm']]
+        trials = record['trials']
+        rows.append({'model': result['model'], 'arm': result['arm'], 'pre': result['pre'],
+                     'subset': ';'.join(result['subset']), 'n_features': len(result['subset']) + 1,
+                     'validation_rmse': result['validation_rmse'], 'validation_mae': result['validation_mae'],
+                     'best_trial': record['best_trial'], 'attempts': len(trials),
+                     'successful_trials': sum(item['status'] == 'completed' for item in trials),
+                     'total_training_seconds': sum(item.get('training_seconds') or 0 for item in trials),
+                     'selected': state['selected'][result['model']] == result['arm'],
+                     'training_run_id': result['training_run_id']})
+    return pd.DataFrame(rows)
+
+
+def _save(figure, directory, name):
+    figure.tight_layout()
+    for extension in ('png', 'svg', 'pdf'):
+        figure.savefig(directory / f'{name}.{extension}', dpi=300, bbox_inches='tight')
+    plt.close(figure)
+
+
+def create_figures(state, comparison, predictions, output):
+    output.mkdir(parents=True, exist_ok=True)
+    colors = dict(zip(SPACE_NAMES, ('#777777', '#37799b', '#c26633', '#7d6594')))
+    plt.rcParams.update({'font.size': 8, 'axes.spines.top': False, 'axes.spines.right': False,
+                         'legend.frameon': False, 'svg.fonttype': 'none', 'pdf.fonttype': 42})
+    figure, axes = plt.subplots(1, 2, figsize=(8, 3.2), sharey=True)
+    for axis, model in zip(axes, ('XGBoost', 'CNN_LSTM')):
+        for space in SPACE_NAMES:
+            group = comparison.query('model == @model and arm == @space and horizon > 0')
+            hours = group.horizon * pd.Timedelta(state['config']['data']['resolution']).total_seconds() / 3600
+            axis.plot(hours, group.RMSE, color=colors[space], label=space)
+        persistence = comparison.query('model == "Persistence" and horizon > 0')
+        hours = persistence.horizon * pd.Timedelta(state['config']['data']['resolution']).total_seconds() / 3600
+        axis.plot(hours, persistence.RMSE, ':', color='black', label='Persistence')
+        axis.set(title=model, xlabel='Forecast horizon (hours)')
+        axis.legend(fontsize=7)
+    axes[0].set_ylabel('TEST RMSE (kW)')
+    _save(figure, output, 'forecast_horizon_error')
+    figure, axes = plt.subplots(1, 2, figsize=(8, 3.2), sharey=True)
+    for axis, model in zip(axes, ('XGBoost', 'CNN_LSTM')):
+        for space in SPACE_NAMES:
+            trials = state['tuning'][model + '/' + space]['trials']
+            values = [item.get('validation_rmse', np.nan) for item in trials]
+            axis.plot(np.arange(1, len(trials) + 1), pd.Series(values).cummin(),
+                      color=colors[space], label=space)
+        axis.set(title=model, xlabel='TPE attempt')
+        axis.legend(fontsize=7)
+    axes[0].set_ylabel('Best validation RMSE (kW)')
+    _save(figure, output, 'optimization_progress')
+    figure, axes = plt.subplots(2, 1, figsize=(8, 5), sharex=True)
+    for axis, model in zip(axes, ('XGBoost', 'CNN_LSTM')):
+        for space in SPACE_NAMES:
+            frame = predictions[model, space].query('horizon == 1').iloc[:864]
+            axis.plot(pd.to_datetime(frame.target_time), frame.predicted_raw, color=colors[space], label=space)
+        axis.plot(pd.to_datetime(frame.target_time), frame.observed, color='black', label='Observed')
+        axis.set(title=model, ylabel='Power (kW)')
+        axis.legend(ncol=3, fontsize=7)
+    axes[-1].tick_params(axis='x', rotation=25)
+    _save(figure, output, 'prediction_curves')
 
 
 def report(directory, state):
     config = state['config']
-    raw_rows = []
-    prediction_frames = {}
+    rows, predictions = [], {}
     persistence = None
     for record in state['final']:
         metadata_path = Path(record['prediction_metadata'])
         metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
-        metrics_path = metadata_path.with_name(
-            metadata.get('metrics_file', metadata['run_id'] + '_metrics.csv'))
-        prediction_path = metadata_path.with_name(
-            metadata.get('prediction_file', metadata['run_id'] + '.csv'))
-        metrics = pd.read_csv(metrics_path)
+        metrics = pd.read_csv(metadata_path.with_name(metadata['metrics_file']))
+        frame = pd.read_csv(metadata_path.with_name(metadata['prediction_file']))
         if persistence is None:
-            persistence = metrics[(metrics['variant'] == 'raw') & (metrics['model'] == 'Persistence')].copy()
-            persistence['model'], persistence['arm'], persistence['seed'] = 'Persistence', 'persistence', -1
-        metrics = metrics[(metrics['variant'] == 'raw') & (metrics['model'] != 'Persistence')].copy()
-        metrics['model'], metrics['arm'], metrics['seed'] = record['model'], record['arm'], record['seed']
-        raw_rows.append(metrics)
-        prediction_frames[record['model'], record['arm'], record['seed']] = pd.read_csv(prediction_path)
-    results = pd.concat(raw_rows + [persistence], ignore_index=True)
-    mean_rows = []
-    for (model, arm, seed), group in results.groupby(['model', 'arm', 'seed']):
-        row = {'model': model, 'arm': arm, 'seed': seed, 'horizon': 0, 'n': int(group['n'].min())}
-        for metric in ('MAE', 'RMSE', 'nRMSE_cap', 'R2'):
-            row[metric] = group[metric].mean()
-        mean_rows.append(row)
-    results = pd.concat([results, pd.DataFrame(mean_rows)], ignore_index=True, sort=False)
-    comparison = results[['model', 'arm', 'horizon', 'MAE', 'RMSE', 'nRMSE_cap', 'R2', 'n']].copy()
-    comparison.sort_values(['model', 'arm', 'horizon']).to_csv(directory / 'model_comparison.csv', index=False)
-
-    ablations = []
+            persistence = metrics.query('variant == "raw" and model == "Persistence"').copy()
+            persistence['arm'] = 'Persistence'
+        metrics = metrics.query('variant == "raw" and model != "Persistence"').copy()
+        metrics['model'], metrics['arm'] = record['model'], record['arm']
+        rows.append(metrics)
+        predictions[record['model'], record['arm']] = frame
+    anchor = next(iter(predictions.values()))
+    pairing = ['forecast_origin', 'target_time', 'horizon', 'observed']
+    for frame in predictions.values():
+        if not frame[pairing].equals(anchor[pairing]):
+            raise ValueError('All optimized configurations must share identical TEST targets.')
+    comparison = pd.concat([*rows, persistence], ignore_index=True)
+    means = []
+    for (model, arm), group in comparison.groupby(['model', 'arm']):
+        means.append({'model': model, 'arm': arm, 'horizon': 0, 'n': int(group['n'].min()),
+                      **{metric: group[metric].mean() for metric in ('MAE', 'RMSE', 'nRMSE_cap', 'R2')}})
+    comparison = pd.concat([comparison, pd.DataFrame(means)], ignore_index=True)
+    columns = ['model', 'arm', 'horizon', 'MAE', 'RMSE', 'nRMSE_cap', 'R2', 'n']
+    comparison[columns].sort_values(['model', 'arm', 'horizon']).to_csv(directory / 'model_comparison.csv', index=False)
+    screening = screening_summary(state)
+    screening.to_csv(directory / 'validation_screening_summary.csv', index=False)
+    optimized = comparison.query('horizon == 0 and model != "Persistence"')[columns].merge(
+        screening, on=['model', 'arm'], validate='one_to_one')
+    optimized.to_csv(directory / 'optimized_configurations.csv', index=False)
     settings = config['study']
-    for model, selected in state['selected'].items():
-        for horizon in [0] + list(range(1, config['data']['horizon'] + 1)):
-            seed = config['seed']
-            base = prediction_frames[model, 'nonpi_reference', seed]
-            pi = prediction_frames[model, selected, seed]
-            if not base[['forecast_origin', 'target_time', 'horizon', 'observed']].equals(
-                    pi[['forecast_origin', 'target_time', 'horizon', 'observed']]):
-                raise ValueError('Final comparison predictions are not paired on identical targets.')
-            if horizon:
-                base, pi = base[base.horizon == horizon], pi[pi.horizon == horizon]
-            delta = pi['absolute_error'].to_numpy() - base['absolute_error'].to_numpy()
-            paired = pd.DataFrame({'origin': base['forecast_origin'], 'delta': delta}).groupby('origin').delta.mean().to_numpy()
-            interval = paired_bootstrap(paired, settings['bootstrap_resamples'], settings['bootstrap_seed'],
-                                        max(settings['bootstrap_block_length'], config['data']['horizon']))
-            ablations.append({'model': model, 'selected_arm': selected, 'horizon': horizon, **interval})
-    ablation = pd.DataFrame(ablations)
-    ablation.to_csv(directory / 'feature_ablation.csv', index=False)
-    screen_summary = screening_summary(state)
-    screen_summary.to_csv(directory / 'validation_screening_summary.csv', index=False)
-
-    from .runtime import project_path
-    figure_dir = project_path(config['output_dir']) / 'figures'
-    create_figures(state, comparison, screen_summary, prediction_frames, figure_dir)
-
-    signs = []
-    conclusions = []
-    for model, selected in state['selected'].items():
-        base = comparison.query('model == @model and arm == "nonpi_reference" and horizon == 0').iloc[0]
-        pi = comparison.query('model == @model and arm == @selected and horizon == 0').iloc[0]
-        delta = ablation.query('model == @model and horizon == 0').iloc[0]
-        signs.append(np.sign(delta.delta_mae))
-        mae_percent = 100 * (pi.MAE / base.MAE - 1) if base.MAE > 0 else np.nan
-        rmse_percent = 100 * (pi.RMSE / base.RMSE - 1) if base.RMSE > 0 else np.nan
-        conclusions.append({'model': model, 'selected_arm': selected,
-                            'mae_change_percent': mae_percent, 'rmse_change_percent': rmse_percent,
-                            'ci_low': float(delta.ci_low), 'ci_high': float(delta.ci_high),
-                            'classification': classify_result(mae_percent, rmse_percent,
-                                                              delta.ci_low, delta.ci_high)})
-    consistent = len(set(signs)) == 1
-    direction = ('no_change' if consistent and signs[0] == 0 else
-                 'improvement' if consistent and signs[0] < 0 else 'degradation' if consistent else 'mixed')
-    # Machine-readable conclusions belong in the existing manifest, not a per-run Markdown report.
-    state['summary'] = {'cross_model_mae_trend': direction, 'seed': config['seed'],
-                        'smoke_diagnostic_only': bool(config.get('smoke_study')),
-                        'models': conclusions, 'small_effect_threshold_percent': 1.0,
-                        'interpretation': 'Single-seed exploratory comparison; inspect both MAE and RMSE.'}
-    from .runtime import write_json
+    paired = []
+    for model in ('XGBoost', 'CNN_LSTM'):
+        physics = predictions[model, 'Expanded-Physics']
+        for baseline in ('Original', 'Expanded-Pearson', 'Intrinsic'):
+            base = predictions[model, baseline]
+            for horizon in range(config['data']['horizon'] + 1):
+                left, right = (physics.query('evaluated and horizon == @horizon'), base.query('evaluated and horizon == @horizon')) if horizon else (physics.query('evaluated'), base.query('evaluated'))
+                delta = left.absolute_error.to_numpy() - right.absolute_error.to_numpy()
+                origin_delta = pd.DataFrame({'origin': left.forecast_origin.to_numpy(), 'delta': delta}).groupby('origin').delta.mean().to_numpy()
+                interval = paired_bootstrap(origin_delta, settings['bootstrap_resamples'], settings['bootstrap_seed'],
+                                           max(settings['bootstrap_block_length'], config['data']['horizon']))
+                paired.append({'model': model, 'baseline': baseline, 'horizon': horizon, **interval})
+    paired = pd.DataFrame(paired)
+    paired.to_csv(directory / 'physics_comparison.csv', index=False)
+    create_figures(state, comparison, predictions, project_path(config['output_dir']) / 'figures' / state['study_id'])
+    state['summary'] = {'seed': config['seed'], 'smoke_diagnostic_only': bool(config.get('smoke_study')),
+                        'validation_selected_space': state['selected'],
+                        'test_mean_horizon_metrics': comparison.query('horizon == 0')[columns].to_dict('records'),
+                        'physics_vs_baselines': paired.query('horizon == 0').to_dict('records'),
+                        'interpretation': 'Single-seed equal-attempt-budget joint optimization; effects combine feature space and model adaptation, not isolated feature causality. TEST never selects configurations.'}
     write_json(directory / 'manifest.json', state)
 
 
@@ -195,10 +147,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--manifest', required=True)
     args = parser.parse_args()
-    manifest = Path(args.manifest)
+    manifest = project_path(args.manifest)
     state = json.loads(manifest.read_text(encoding='utf-8'))
-    if state['status'] not in ('evaluated', 'complete', 'completed'):
-        raise ValueError('The experiment has no complete TEST predictions to report.')
+    if state.get('workflow_version') != 3 or state['status'] not in ('evaluated', 'completed'):
+        raise ValueError('A joint-search study with complete TEST predictions is required.')
     report(manifest.parent, state)
 
 

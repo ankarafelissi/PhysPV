@@ -9,7 +9,7 @@ import pandas as pd
 
 from src.config import arm_config, data_contract, load_config
 from src.data import prepare_data
-from src.experiments import _arms, _select, _winners, _followup_arms
+from src.data import EXPANDED_FEATURES, PHYSICS_SELECTED, SPACE_NAMES, prepare_spaces
 from src.data import CANDIDATE_FEATURES, build_features, feature_names, safe_ratio, solar_features
 from src.metrics import evaluate
 
@@ -36,42 +36,6 @@ class ExperimentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'unique supported'):
             arm_config(self.config, ['Pac', 'Pac'], 'XGBoost', 11)
 
-    def test_physics_arms_extend_one_reference(self):
-        reference = self.config['experiment']['reference_features']
-        arms = _arms(self.config)
-        self.assertEqual(arms[0]['id'], 'nonpi_reference')
-        for arm in arms:
-            self.assertEqual(arm['subset'][:len(reference)], reference)
-
-    def test_selection_uses_validation_for_seed_11(self):
-        arms = _arms(self.config)
-        records = [{'model': model, 'arm': arm['id'], 'seed': 11,
-                    'validation_mae': 1.0 + index / 100}
-                   for model in ('XGBoost', 'CNN_LSTM')
-                   for index, arm in enumerate(arms)]
-        self.assertEqual(_select(records, arms, 11),
-                         {'XGBoost': 'nonpi_reference', 'CNN_LSTM': 'nonpi_reference'})
-        with self.assertRaisesRegex(ValueError, 'configured seed'):
-            _select(records[:-1], arms, 11)
-
-    def test_winners_threshold_combinations_and_replacement(self):
-        arms = _arms(self.config)
-        records = [{'model': 'XGBoost', 'arm': arm['id'], 'seed': 11,
-                    'validation_mae': 1.} for arm in arms]
-        records[1]['validation_mae'] = .994  # 0.6% wins
-        records[2]['validation_mae'] = .996  # 0.4% excluded
-        records[3]['validation_mae'] = .98
-        records[4]['validation_mae'] = .97
-        winners = _winners(records, arms, 'XGBoost', 11, .5)
-        self.assertEqual([a['id'] for a in winners], ['add_tc', 'add_tm', 'add_pac'])
-        followup = _followup_arms(self.config, winners, 'XGBoost')
-        self.assertEqual(len(followup), 4)
-        self.assertTrue(all('Pdc' not in a['subset'] for a in followup[:-1]))
-        self.assertEqual(followup[-1]['subset'], ['Pac', 'clear_sky_index', 'solar_elevation'])
-        self.assertEqual(len(_followup_arms(self.config, [], 'XGBoost')), 1)
-        records[1]['validation_mae'] = .995  # Exactly 0.5% is excluded
-        self.assertNotIn('add_pac', [a['id'] for a in _winners(records, arms, 'XGBoost', 11, .5)])
-
     def test_ratio_floors_and_unconfigured_station(self):
         np.testing.assert_allclose(safe_ratio([2., 2., 2., 2., np.nan],
                                              [0., .05, .1, np.nan, .1], .05),
@@ -79,7 +43,7 @@ class ExperimentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'positive'):
             safe_ratio([1.], [1.], 0)
         with self.assertRaisesRegex(ValueError, 'verified station metadata'):
-            solar_features(self.frame, load_config('config/config.yaml')['data'])
+            solar_features(self.frame, {**self.config['data'], 'solar': {}})
 
     def test_solar_geometry_clear_sky_units_and_timezone(self):
         config = copy.deepcopy(self.config['data'])
@@ -132,6 +96,41 @@ class ExperimentTests(unittest.TestCase):
         after, new_scalers = prepare_data(build_features(modified, config['data']), config['data'])
         np.testing.assert_array_equal(before['TRAIN']['X'], after['TRAIN']['X'])
         np.testing.assert_array_equal(scalers['X'].data_max_, new_scalers['X'].data_max_)
+
+    def test_joint_search_has_identical_origins_for_different_pre_and_features(self):
+        self.frame.loc[self.frame.index[45], 'HUMIDITY[%]'] = np.nan
+        parts = []
+        for pre, subset in [(0, []), (3, ['Pac']), (6, ['HUMIDITY[%]', 'HoursOfDay'])]:
+            config = arm_config(self.config, subset, 'XGBoost', 11)
+            config['data'].update(pre=pre, origin_pre=6, eligibility_features=['HUMIDITY[%]'])
+            parts.append(prepare_data(build_features(self.frame, config['data']), config['data'])[0])
+        for name in ('TRAIN', 'VAL', 'TEST'):
+            for other in parts[1:]:
+                np.testing.assert_array_equal(parts[0][name]['origins'], other[name]['origins'])
+                np.testing.assert_array_equal(parts[0][name]['Y'], other[name]['Y'])
+        self.assertEqual(parts[0]['TRAIN']['X'].shape[1], 1)
+        self.assertEqual(parts[-1]['TRAIN']['X'].shape[1], 7)
+
+    def test_feature_space_selectors_ignore_heldout_values(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        frame = self.frame.assign(**{'WIND_DIR[deg]': np.arange(len(self.frame)), 'Pressure[mbar]': 1000.})
+        changed = frame.copy()
+        changed.iloc[98:] *= 9
+        original_config = copy.deepcopy(self.config)
+        expected_data = arm_config(self.config, list(EXPANDED_FEATURES),
+                                   'XGBoost', self.config['seed'])['data']
+        with tempfile.TemporaryDirectory() as directory:
+            with patch('src.data.load_data', return_value=frame) as load:
+                before = prepare_spaces(self.config, Path(directory))
+                load.assert_called_once_with(expected_data)
+            with patch('src.data.load_data', return_value=changed):
+                after = prepare_spaces(self.config, Path(directory))
+        self.assertEqual(self.config, original_config)
+        self.assertEqual(before, after)
+        self.assertEqual(before['Expanded-Physics'], list(PHYSICS_SELECTED))
+        self.assertEqual(before['Intrinsic'], [])
 
     def test_rmse_is_root_of_mean_square_per_horizon(self):
         y = np.array([[0., 2.], [2., 4.]])

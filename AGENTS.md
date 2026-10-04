@@ -1,13 +1,31 @@
 # Project rules
 
 ## Research scope
-PhysPV studies which physics-informed features improve PV-power forecasting and whether their usefulness differs between XGBoost and CNN-LSTM.
+PhysPV studies physics-guided search-space design for PV-power forecasting.
+The default workflow is raw SOLETE data -> construct Pac/Pdc/TempCell/TempModule/
+MinutesOfDay/HoursOfDay -> predeclare physically relevant, nonredundant feature space -> jointly
+optimize feature subset, PRE and model hyperparameters with bounded Optuna TPE.
+Compare independently optimized Original, Expanded-Pearson, Expanded-Physics and
+Intrinsic spaces for XGBoost and CNN_LSTM, with Persistence as a forecast baseline.
 
-Use bounded Bayesian/TPE optimization to obtain reasonable configurations; tuning is
-not a research objective. Freeze parameters before individual and combination feature
-experiments. Negative and mixed results are valid. Never optimize toward a desired
-conclusion or add model families. Use one default seed; extra seeds are only used for
-final selected experiments when explicitly requested.
+Physics defines the search space; TPE adapts model configurations inside it.
+Do not tune only Non-PI then freeze parameters for individual PI additions.
+Use equal predeclared attempt budgets and common forecast origins across spaces.
+Fit Pearson selection and scaling on TRAIN only, select configurations by mean
+per-horizon VAL RMSE, freeze every space winner, then evaluate TEST once.
+Negative and mixed results are valid. Never optimize toward a desired conclusion
+or add model families. A similar result structure to SOLETE does not imply matching
+its numeric results or conclusions. Use one default seed; extra seeds require an
+explicit request. Do not expand budgets or retune after seeing TEST.
+The default reference is Energy Reports 2022 (10.1016/j.egyr.2022.05.006):
+5-minute data, H=60 (5 hours), chronological 70/20/10, PRE up to 120 samples.
+Use paper Table 1 equipment parameters and explicit target correction for the
+available-power task. Preserve raw measurements and report raw-target sensitivity.
+Primary VAL/TEST metrics omit geometric night at each target timestamp; keep the
+continuous timeline and causal observed histories. Normalize errors by the stated
+10 kW AC rating. Document unresolved reference details and timestamp-year mismatch;
+never claim exact numerical reproduction. Keep the previous hourly study labelled
+as a legacy adaptation, not the current default experiment.
 
 ## Working style
 - Keep one clear default experiment path and simple YAML configuration.

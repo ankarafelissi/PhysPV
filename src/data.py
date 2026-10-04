@@ -1,4 +1,5 @@
 """PV features, timestamped inputs, chronological windows and train-only scaling."""
+import copy
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
@@ -12,6 +13,11 @@ DERIVED_FEATURES = (*PHYSICS_FEATURES, *STATE_FEATURES, *SOLAR_FEATURES)
 RESERVED_PHYSICS = (*DERIVED_FEATURES, 'TempModule_RP')
 PHYSICAL_INPUTS = ('POA Irr[kW1m2]', 'TEMPERATURE[degC]', 'WIND_SPEED[m1s]')
 CANDIDATE_FEATURES = ('POA Irr[kW1m2]', 'GHI[kW1m2]', *DERIVED_FEATURES, 'HoursOfDay')
+ORIGINAL_FEATURES = ('TEMPERATURE[degC]', 'HUMIDITY[%]', 'WIND_SPEED[m1s]',
+                     'WIND_DIR[deg]', 'GHI[kW1m2]', 'POA Irr[kW1m2]')
+SPACE_NAMES = ('Original', 'Expanded-Pearson', 'Expanded-Physics', 'Intrinsic')
+EXPANDED_FEATURES = (*ORIGINAL_FEATURES, *PHYSICS_FEATURES, 'MinutesOfDay', 'HoursOfDay')
+PHYSICS_SELECTED = ('HUMIDITY[%]', 'POA Irr[kW1m2]', 'Pac', 'TempCell', 'HoursOfDay')
 
 
 def feature_names(config):
@@ -25,6 +31,15 @@ def feature_names(config):
         raise ValueError('data.features must not contain duplicates.')
     if set(base).intersection(RESERVED_PHYSICS):
         raise ValueError('Do not list physics columns in data.features; use data.physics.')
+    if 'selected_features' in config:
+        selected = config['selected_features']
+        supported = (config['target'], *ORIGINAL_FEATURES, *CANDIDATE_FEATURES, 'MinutesOfDay')
+        if (not isinstance(selected, list) or not selected or len(selected) != len(set(selected))
+                or not set(selected).issubset(supported) or config['target'] not in selected):
+            raise ValueError('selected_features must contain unique supported features and historical target.')
+        if config['physics'] != bool(set(selected).intersection(DERIVED_FEATURES)):
+            raise ValueError('data.physics must match selected derived features.')
+        return list(dict.fromkeys(name for name in supported if name in selected))
     if 'candidate_subset' in config:
         subset = config['candidate_subset']
         if (not isinstance(subset, list) or len(subset) != len(set(subset))
@@ -120,7 +135,7 @@ def safe_ratio(numerator, denominator, minimum):
     return values
 
 
-def solar_features(frame, config):
+def solar_features(frame, config, geometry_only=False):
     """Verified columns or NOAA geometry with a fixed Haurwitz clear-sky model."""
     settings = config.get('solar', {})
     if settings.get('elevation_column') and settings.get('clear_ghi_column'):
@@ -158,6 +173,8 @@ def solar_features(frame, config):
         clear[daylight] = 1.098 * cosine[daylight] * np.exp(-.059 / cosine[daylight])
     if np.any(np.isfinite(clear) & (clear < 0)):
         raise ValueError('Clear-sky GHI must be nonnegative and use kW/m2.')
+    if geometry_only:
+        return pd.DataFrame({'solar_elevation': elevation, 'solar_zenith': 90 - elevation}, index=frame.index)
     return pd.DataFrame({
         'clear_sky_index': safe_ratio(frame['GHI[kW1m2]'], clear,
                                      config.get('ratio_floors', {}).get('clear_ghi_kw_m2', .02)),
@@ -166,12 +183,26 @@ def solar_features(frame, config):
 
 
 def build_features(frame, config):
-    """Build both ablation arms on a common physical-input validity mask."""
+    """Build all spaces with the same predeclared target processing."""
     names = feature_names(config)
-    if config.get('correct_power') is not False:
-        raise ValueError('data.correct_power must remain false for the physics ablation.')
     result = frame.drop(columns=list(RESERVED_PHYSICS), errors='ignore').copy()
     physical = pv_power_features(result, config['plant'])
+    result['observed_power_raw'] = result[config['target']]
+    if config.get('correct_power'):
+        rules = config['power_correction']
+        measured = result[config['target']].to_numpy(float)
+        pac = physical['Pac'].to_numpy(float)
+        active = pac > rules['minimum_pac_kw']
+        replace = active & (np.abs(measured - pac) > rules['relative_deviation'] * pac)
+        replace |= ~np.isfinite(measured) & np.isfinite(pac)
+        corrected = np.where(replace, pac, measured)
+        result[config['target']] = np.where(corrected <= rules['zero_floor_kw'], 0, corrected)
+        physical['Pac'] = physical['Pac'].where(physical['Pac'] > rules['zero_floor_kw'], 0)
+        result.attrs['power_correction'] = {'replaced_rows': int(replace.sum()),
+            'finite_changed_rows': int(np.sum(np.isfinite(measured) & (measured != result[config['target']]))),
+            'mean_absolute_change_kw': float(np.nanmean(abs(result[config['target']] - measured)))}
+    if config.get('evaluation', {}).get('daylight_only'):
+        result['evaluation_daylight'] = solar_features(frame, config, geometry_only=True)['solar_elevation'] > 0
     # Compute eligibility in both arms, but expose no physics columns when off.
     result.attrs['eligible_rows'] = np.isfinite(physical.to_numpy()).all(axis=1)
     if 'candidate_subset' in config:
@@ -179,6 +210,8 @@ def build_features(frame, config):
         result.attrs['eligible_rows'] &= np.isfinite(result[['GHI[kW1m2]']].to_numpy()).all(axis=1)
     if 'HoursOfDay' in names:
         result['HoursOfDay'] = result.index.hour
+    if 'MinutesOfDay' in names:
+        result['MinutesOfDay'] = result.index.hour * 12 + result.index.minute // 5
     for name, column, operation in (
         ('MeanPrevH', config['target'], 'mean'), ('StdPrevH', config['target'], 'std'),
         ('MeanWindSpeedPrevH', 'WIND_SPEED[m1s]', 'mean'),
@@ -207,7 +240,58 @@ def build_features(frame, config):
             result[name] = derived[name]
     if set(result.columns).intersection(RESERVED_PHYSICS) != selected_physics:
         raise ValueError('Physics feature invariant violated.')
+    if config.get('eligibility_features'):
+        raw = [name for name in config['eligibility_features'] if name not in DERIVED_FEATURES
+               and name not in ('HoursOfDay', 'MinutesOfDay')]
+        result.attrs['eligible_rows'] &= np.isfinite(result[raw].to_numpy(float)).all(axis=1)
     return result
+
+
+def prepare_spaces(config, directory):
+    """Compute selectors before HPO, using only chronological TRAIN rows."""
+    data = copy.deepcopy(config['data'])
+    data.update(selected_features=[data['target'], *EXPANDED_FEATURES],
+                candidate_subset=[name for name in EXPANDED_FEATURES if name in CANDIDATE_FEATURES],
+                physics=True)
+    frame = build_features(load_data(data), data)
+    pd.DataFrame([{'partition': label, 'rows': right-left,
+        'changed_rows': int((frame['observed_power_raw'].iloc[left:right] != frame[data['target']].iloc[left:right]).sum()),
+        'mean_absolute_change_kw': float(abs(frame['observed_power_raw'].iloc[left:right] - frame[data['target']].iloc[left:right]).mean()),
+        'daylight_rows': int(frame['evaluation_daylight'].iloc[left:right].sum()) if 'evaluation_daylight' in frame else right-left}
+        for label, left, right in [('TRAIN', 0, int(len(frame)*data['split'][0])),
+            ('VAL', int(len(frame)*data['split'][0]), int(len(frame)*sum(data['split'][:2]))),
+            ('TEST', int(len(frame)*sum(data['split'][:2])), len(frame))]]).to_csv(directory / 'preprocessing_audit.csv', index=False)
+    end = int(np.floor(len(frame) * data['split'][0] + 1e-9))
+    columns = [data['target'], *EXPANDED_FEATURES]
+    train = frame.iloc[:end].loc[frame.attrs['eligible_rows'][:end], columns].dropna()
+    if len(train) < 2:
+        raise ValueError('Insufficient finite TRAIN observations for feature selection.')
+    correlation = train.corr()
+    correlation.to_csv(directory / 'train_pearson_correlation.csv')
+    train.corr(method='spearman').to_csv(directory / 'train_spearman_correlation.csv')
+    target_correlation = correlation[data['target']]
+    pearson = [name for name in EXPANDED_FEATURES
+               if abs(target_correlation[name]) >= config['experiment']['pearson_threshold']
+               or name in config['experiment'].get('pearson_force_include', [])]
+    spaces = {name: list(features) for name, features in zip(SPACE_NAMES,
+              (ORIGINAL_FEATURES, pearson, PHYSICS_SELECTED, ()))}
+    reasons = [
+        ('GHI[kW1m2]', 'POA Irr[kW1m2]', 'POA measures irradiance on the actual array plane'),
+        ('Pdc', 'Pac', 'AC estimate incorporates inverter conversion efficiency'),
+        ('TempModule', 'TempCell', 'Cell temperature enters the PV power equation'),
+        ('TEMPERATURE[degC]', 'TempCell', 'Ambient temperature is incorporated in cell temperature'),
+        ('WIND_SPEED[m1s]', 'TempCell', 'Wind cooling is incorporated in cell temperature'),
+        ('WIND_DIR[deg]', None, 'Not an input to the configured PV performance model'),
+        ('MinutesOfDay', 'HoursOfDay', 'Coarser time indicator reduces redundant time-of-day values'),
+    ]
+    pd.DataFrame([{'removed': left, 'retained': right, 'reason': reason,
+                   'train_pearson': float(correlation.loc[left, right]) if right else None}
+                  for left, right, reason in reasons]).to_csv(directory / 'physical_redundancy.csv', index=False)
+    pd.DataFrame([{'feature': name, 'train_target_pearson': target_correlation[name],
+                   'pearson_selected': name in pearson, 'physics_selected': name in PHYSICS_SELECTED,
+                   'n_train_rows': len(train)} for name in EXPANDED_FEATURES]).to_csv(
+                       directory / 'feature_space_selection.csv', index=False)
+    return spaces
 
 
 def input_identity(config):
@@ -266,6 +350,9 @@ def prepare_data(frame, config, scalers=None):
     pre, horizon = config['pre'], config['horizon']
     if type(pre) is not int or pre < 0 or type(horizon) is not int or horizon < 1:
         raise ValueError('pre must be a nonnegative integer; horizon a positive integer.')
+    origin_pre = config.get('origin_pre', pre)
+    if type(origin_pre) is not int or origin_pre < pre:
+        raise ValueError('origin_pre must be an integer at least as large as pre.')
     features, target = feature_names(config), config['target']
     if not isinstance(target, str):
         raise ValueError('This pipeline supports one target and multiple forecast steps.')
@@ -287,11 +374,11 @@ def prepare_data(frame, config, scalers=None):
         raise ValueError('Feature eligibility mask does not match the time axis.')
     splits = {}
     for name, start, end in [('TRAIN', 0, cut1), ('VAL', cut1, cut2), ('TEST', cut2, n)]:
-        origins = np.arange(max(pre, start - 1), end - horizon)
+        origins = np.arange(max(origin_pre, start - 1), end - horizon)
         origins = np.asarray([t for t in origins
                               if np.isfinite(values[t-pre:t+1]).all()
-                              and eligibility[t-pre:t+1].all()
-                              and np.isfinite(labels[t-pre:t+horizon+1]).all()], dtype=int)
+                              and eligibility[t-origin_pre:t+1].all()
+                              and np.isfinite(labels[t-origin_pre:t+horizon+1]).all()], dtype=int)
         if len(origins) == 0:
             raise ValueError(f'{name} has no valid windows: rows={n}, pre={pre}, '
                              f'horizon={horizon}. Use more data or shorter windows.')
@@ -301,6 +388,10 @@ def prepare_data(frame, config, scalers=None):
             'persistence': np.repeat(labels[origins, None], horizon, axis=1),
             'origins': frame.index[origins],
             'target_times': np.stack([frame.index[t+1:t+horizon+1].to_numpy() for t in origins]),
+            'evaluation_mask': np.stack([frame['evaluation_daylight'].to_numpy(bool)[t+1:t+horizon+1]
+                for t in origins]) if 'evaluation_daylight' in frame else np.ones((len(origins), horizon), bool),
+            'Y_raw': np.stack([frame['observed_power_raw'].to_numpy(float)[t+1:t+horizon+1]
+                for t in origins]) if 'observed_power_raw' in frame else np.stack([labels[t+1:t+horizon+1] for t in origins]),
         }
         if 'POA Irr[kW1m2]' in frame:
             poa = frame['POA Irr[kW1m2]'].to_numpy(dtype=float)

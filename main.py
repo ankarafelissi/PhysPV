@@ -9,15 +9,15 @@ def main():
     parser.add_argument('--model', choices=['CNN_LSTM', 'XGBoost', 'all'])
     parser.add_argument('--physics', choices=['on', 'off'], help='Override the physical-feature switch for both model families')
     parser.add_argument('--smoke', action='store_true', help='At most 240 rows, PRE=2, H=1, one epoch / five trees')
-    parser.add_argument('--feature-study', action='store_true',
-                        help='Run the one-seed validation-selected feature comparison')
+    parser.add_argument('--feature-study', '--optimize', dest='feature_study', action='store_true',
+                        help='Run joint TPE across Original/Pearson/Physics/Intrinsic')
     parser.add_argument('--evaluate-test', action='store_true', help='Evaluate TEST after the feature study selection')
     args = parser.parse_args()
     configure_runtime()
     from src.config import load_config
     from src.train import run
     config = load_config(args.config)
-    if args.feature_study:
+    if args.feature_study or not (args.model or args.physics or args.smoke):
         from src.experiments import run as experiment
         if args.model or args.physics:
             parser.error('--feature-study controls both models and all feature arms; omit --model/--physics')

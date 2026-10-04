@@ -73,7 +73,7 @@ class PipelineTests(unittest.TestCase):
         original = frame.copy(deep=True)
         config = load_config('config/config.yaml')['data']
         config.pop('candidate_subset')
-        config.update(features=['P_Solar[kW]'], physics=True)
+        config.update(features=['P_Solar[kW]'], physics=True, correct_power=False)
         result = build_features(frame, config)
         pd.testing.assert_frame_equal(frame, original)
         pd.testing.assert_series_equal(result['P_Solar[kW]'], frame['P_Solar[kW]'])

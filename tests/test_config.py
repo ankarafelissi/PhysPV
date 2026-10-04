@@ -30,7 +30,7 @@ class ConfigurationTests(unittest.TestCase):
                 os.chdir(directory)
                 self.assertEqual(project_path('config/config.yaml'), PROJECT_ROOT / 'config/config.yaml')
                 self.assertEqual(project_path(directory), Path(directory))
-                self.assertEqual(load_config('config/config.yaml')['data']['p_nom_kw'], 7.44)
+                self.assertEqual(load_config('config/config.yaml')['data']['p_nom_kw'], 7.2)
             finally:
                 os.chdir(previous)
 

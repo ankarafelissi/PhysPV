@@ -12,7 +12,7 @@ import yaml
 from .config import arm_name, data_contract, output_paths, validate_config, smoke_config
 from .data import load_data, prepare_data, build_features, input_identity, partition_metadata
 from .metrics import (export_training_curve, fit_scenario_thresholds,
-                      forecast_health, require_healthy_forecasts)
+                      forecast_health, require_healthy_forecasts, evaluate)
 from .models import load_model, predict_scaled, save_model, train_model
 from .runtime import environment_metadata, project_path
 
@@ -37,8 +37,7 @@ def run(config, model_name=None, smoke=False, run_id=None, study_dir=None):
     try:
         frame = build_features(load_data(config['data']), config['data'])
         cache = project_path(config['data']['processed_path'])
-        if is_smoke:
-            cache = cache.with_name(cache.stem + '_smoke' + cache.suffix)
+        cache = cache.with_name(run_id + cache.suffix)
         cache.parent.mkdir(parents=True, exist_ok=True)
         frame.to_hdf(cache, key='features', mode='w')
         splits, scalers = prepare_data(frame, config['data'])
@@ -59,6 +58,9 @@ def run(config, model_name=None, smoke=False, run_id=None, study_dir=None):
         validation_predicted = scalers['Y'].inverse_transform(
             validation_scaled.reshape(-1, 1)).reshape(validation_scaled.shape)
         health = forecast_health(splits['VAL']['Y'], validation_predicted)
+        validation_scores = evaluate(splits['VAL']['Y'], validation_predicted,
+            splits['VAL']['persistence'], 1.0, name, splits['VAL']['evaluation_mask'])
+        validation_scores = validation_scores[validation_scores['model'] == name]
         health.insert(0, 'run_id', run_id)
         health.to_csv(paths['results'] / 'validation_health.csv', index=False)
         (paths['results'] / 'history.json').write_text(json.dumps(history, indent=2), encoding='utf-8')
@@ -71,7 +73,9 @@ def run(config, model_name=None, smoke=False, run_id=None, study_dir=None):
             'data_contract': data_contract(config['data']),
             'partitions': partition_metadata(splits), 'input': input_identity(config['data']),
             'environment': environment_metadata(), 'scenario_thresholds': thresholds,
-            'validation_mae': float(health['MAE'].mean()),
+            'validation_mae': float(validation_scores['MAE'].mean()),
+            'validation_rmse': float(validation_scores['RMSE'].mean()),
+            'power_correction': frame.attrs.get('power_correction'),
             'best_checkpoint': str(checkpoint.relative_to(artifact)) if checkpoint else None,
             'training_seconds': training_seconds,
             'train_target_end': str(splits['TRAIN']['target_times'][-1, -1]),

@@ -81,7 +81,7 @@ def scenario_labels(part, thresholds):
     }
 
 
-def evaluate(observed, predicted, persistence, p_nom_kw, name='Forecaster'):
+def evaluate(observed, predicted, persistence, p_nom_kw, name='Forecaster', mask=None):
     observed, predicted, persistence = [np.asarray(x, dtype=float) for x in (observed, predicted, persistence)]
     if observed.ndim != 2 or observed.size == 0:
         raise ValueError('Evaluation requires a nonempty (origins, horizon) array.')
@@ -92,15 +92,20 @@ def evaluate(observed, predicted, persistence, p_nom_kw, name='Forecaster'):
     if not all(np.isfinite(a).all() for a in (observed, predicted, persistence)):
         raise ValueError('Evaluation contains non-finite values.')
     rows = []
+    mask = np.ones(observed.shape, bool) if mask is None else np.asarray(mask, bool)
+    if mask.shape != observed.shape or not mask.any(axis=0).all():
+        raise ValueError('Evaluation mask must match targets and retain samples at every horizon.')
     for label, values in [(name, predicted), ('Persistence', persistence)]:
         error = values - observed
         for h in range(observed.shape[1]):
-            mse = float(np.mean(error[:, h] ** 2))
-            variance = float(np.mean((observed[:, h] - observed[:, h].mean()) ** 2))
-            rows.append({'model': label, 'horizon': h+1, 'MAE': float(np.mean(abs(error[:, h]))),
+            valid = mask[:, h]
+            mse = float(np.mean(error[valid, h] ** 2))
+            truth = observed[valid, h]
+            variance = float(np.mean((truth - truth.mean()) ** 2))
+            rows.append({'model': label, 'horizon': h+1, 'MAE': float(np.mean(abs(error[valid, h]))),
                          'R2': float(1 - mse / variance) if variance > 0 else np.nan,
                          'MSE': mse, 'RMSE': float(np.sqrt(mse)),
-                         'nRMSE_cap': float(100 * np.sqrt(mse) / p_nom_kw), 'n': len(observed)})
+                         'nRMSE_cap': float(100 * np.sqrt(mse) / p_nom_kw), 'n': int(valid.sum())})
     return pd.DataFrame(rows)
 
 
@@ -116,6 +121,8 @@ def export_results(part, predicted, name, run_id, paths, config, thresholds):
         'target_time': part['target_times'].reshape(-1),
         'horizon': np.tile(np.arange(1, horizon+1), len(predicted)),
         'observed': part['Y'].reshape(-1), 'predicted': predicted.reshape(-1),
+        'observed_raw': part['Y_raw'].reshape(-1),
+        'evaluated': part['evaluation_mask'].reshape(-1),
         'predicted_raw': predicted.reshape(-1), 'predicted_constrained': constrained.reshape(-1),
         'persistence': part['persistence'].reshape(-1),
         'sky_variability': np.repeat(part['sky_variability'], horizon),
@@ -134,9 +141,15 @@ def export_results(part, predicted, name, run_id, paths, config, thresholds):
         health['variant'] = variant
         health_tables.append(health)
     health = pd.concat(health_tables, ignore_index=True)
-    scores = evaluate(part['Y'], predicted, part['persistence'], config['data']['p_nom_kw'], name)
+    denominator = config['data'].get('evaluation', {}).get('normalization_kw', config['data']['p_nom_kw'])
+    mask = part['evaluation_mask']
+    scores = evaluate(part['Y'], predicted, part['persistence'], denominator, name, mask)
+    # Keep raw-measurement sensitivity visible: corrected targets are partly model-derived.
+    raw_mask = mask & np.isfinite(part['Y_raw'])
+    evaluate(np.nan_to_num(part['Y_raw']), predicted, part['persistence'], denominator,
+             name, raw_mask).to_csv(paths['results'] / 'raw_target_metrics.csv', index=False)
     scores['variant'] = 'raw'
-    limited = evaluate(part['Y'], constrained, part['persistence'], config['data']['p_nom_kw'], name)
+    limited = evaluate(part['Y'], constrained, part['persistence'], denominator, name, mask)
     limited = limited[limited['model'] != 'Persistence'].copy()
     limited['variant'] = 'constrained'
     scores = pd.concat([scores, limited], ignore_index=True)

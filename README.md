@@ -1,157 +1,74 @@
-# PhysPV 2.0: Physics-Informed PV Forecasting
+# PhysPV: five-minute physics-guided TPE
 
-This repository compares **Persistence, XGBoost, PI-XGBoost, CNN-LSTM, and
-PI-CNN-LSTM** for short-term PV-power forecasting. PI models use additional
-physics-derived input features; they do not use a physics-informed loss.
+Physics defines a compact feature space; TPE jointly chooses feature subset,
+previous samples (PRE) and model configuration. Compare Original, Expanded-Pearson,
+Expanded-Physics and Intrinsic for XGBoost and CNN_LSTM, with Persistence.
 
-This repository compares CNN-LSTM with XGBoost.
-A separate follow-up project will introduce a Transformer-based model for further comparison.
+The current protocol follows the five-minute, 60-step (five-hour) experiment in
+[Pombo et al., Energy Reports 2022](https://doi.org/10.1016/j.egyr.2022.05.006).
+It replaces grid/coarse-to-fine search with TPE and retains the project's two
+model families. It is a documented adaptation, not an exact numerical reproduction.
 
-The study follows the experimental logic of
-[Pombo et al. (2022)](https://doi.org/10.1016/j.egyr.2022.05.006) and the corrected
-split and RMSE principles from SOLETE v3.0+. It tests the method without assuming
-that physics-informed features must improve performance.
+| Space | Optional inputs |
+| --- | --- |
+| Original | Temperature, humidity, wind speed/direction, GHI, POA |
+| Expanded-Pearson | Absolute TRAIN correlation >=0.7; humidity explicitly retained |
+| Expanded-Physics | Humidity, POA, Pac, TempCell, HoursOfDay |
+| Intrinsic | None; historical target power only |
 
-## Setup
+Historical target power is mandatory. Expanded candidates also include Pdc,
+TempModule and MinutesOfDay. PRE ranges from 0 to 120 five-minute samples using
+the union of the reference coarse/fine grids. PRE=30 with all pool features is
+the first trial. Seed 11, 40 attempts per model/space, ten startup attempts:
+320 fits total, fixed before execution. Failures remain recorded and consume budget.
+The objective is mean per-horizon daylight VAL RMSE. All eight winners freeze
+before TEST; no TEST-driven reselection or budget extension.
 
-Use Python 3.9 and the pinned dependencies:
-
-```bash
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-# Linux/macOS: source .venv/bin/activate
-python -m pip install -r requirements.txt
-python -m unittest discover -s tests -v
-```
-
-Download `SOLETE_Pombo_60min.h5` from the
-[SOLETE dataset](https://doi.org/10.11583/DTU.17040767) and place it in `data/raw/`.
-The included `SOLETE_short.h5` is only for execution checks. Large data and generated
-artifacts are excluded from Git.
+CNN_LSTM searches filters, convolution/pooling sizes, LSTM depth/width, dense
+layers, batch and learning rate; ceiling 1000 epochs with early stopping. XGBoost
+searches depth, learning rate, child weight, regularization and sampling, with
+700-tree ceiling and early stopping. GPU hist is enabled for XGBoost; the local
+TensorFlow environment currently uses CPU. See [the full protocol](docs/research.md)
+for ranges, provenance, unresolved reference details and interpretation limits.
 
 ## Run
 
+Use Python 3.9 and `pip install -r requirements.txt`. Put SOLETE_Pombo_5min.h5
+in data/raw/. Local interpreter: C:/Users/felix/anaconda3/envs/pv2024/python.exe.
+
 ```bash
-# Fast pipeline check
-python main.py --model all --smoke
-
-# VAL-only feature study (TEST remains closed)
-python main.py --feature-study
-
-# Resume an interrupted study
-python -m src.experiments --resume outputs/results/STUDY_ID/manifest.json
-
-# Open TEST after reviewing the frozen VAL selection
+python -m unittest discover -s tests
+python -m src.experiments --smoke --evaluate-test
+python main.py                     # optimize; TEST closed
+python main.py --optimize --evaluate-test
 python -m src.experiments --resume outputs/results/STUDY_ID/manifest.json --evaluate-test
-
-# Evaluate one saved model
-python -m src.predict --model-dir outputs/models/RUN_ID
-
-# Rebuild verified tables and figures without training
 python -m src.evaluation --manifest outputs/results/STUDY_ID/manifest.json
 ```
 
-The default study uses seed `11`. Hyperparameters and physics-feature subsets are
-selected from TRAIN/VAL only. TEST is used after selection is frozen. Scalers are fit
-on TRAIN and reused for VAL and TEST. A single-seed result is one reproducible run,
-not evidence of seed stability.
+`--feature-study` aliases `--optimize`. Standalone `--model` / `--physics` are
+diagnostics, not optimized comparison arms. Smoke is an execution check only.
 
-CNN-LSTM reports loss, validation loss, validation MAE and GPU availability every ten
-epochs. It stops on repeated severe validation-loss anomalies and preserves the lowest
-validation-loss weights under `best_checkpoint/` in the model directory.
+## Data and outputs
 
-The default path first runs 12 sequential Optuna TPE attempts per model, including
-the configured starting parameters. Four successful trials form the startup phase;
-later suggestions use TPE. The objective is mean per-horizon VAL MAE in kW on the
-non-PI reference. No TEST scores enter tuning. Tree count, CNN epoch ceiling and
-early-stopping settings remain fixed. Failed attempts consume the bounded budget.
-Tuning is preparation, not a research objective.
+Chronological 70/20/10; continuous five-minute histories; common forecast origins
+using maximum PRE; TRAIN-only scalers/Pearson. Primary VAL/TEST scores omit
+geometric night per target timestamp and normalize by 10 kW AC rating. Source HDF5
+measurements are preserved; the available-power target uses explicit 20% Pac
+correction. Predictions also retain raw observed targets and raw-target metrics.
+See [the data contract](docs/data.md). Corrected targets are partly physics-derived;
+results on these targets do not alone prove better measured-power forecasting.
 
-The selected parameters are frozen in `frozen_config.yaml` inside the study directory.
-Each model then screens eight single features against the EPOA/GHI/Hday reference:
-`Pac`, `Pdc`, `TempModule`, `TempCell`, `physics_residual`, `performance_ratio`,
-`clear_sky_index`, and `solar_elevation`. Only singles with a relative VAL MAE
-improvement strictly above 0.5% become winners. Up to three pairs among the top three
-winners are tested; fewer than three winners yield fewer combinations. One fixed
-replacement then replaces EPOA/GHI/Hday with Pac/clear-sky index/solar elevation.
-The reference, winner singles, combinations and replacement compete on VAL MAE.
-The reference may win; negative and mixed results remain valid.
+Existing outputs/results/STUDY_ID/ holds the manifest, selector/correlation tables,
+tuning_results.csv, frozen_config.yaml, validation_screening_summary.csv,
+model_comparison.csv, optimized_configurations.csv, physics_comparison.csv, and
+per-attempt logs/history/predictions/metrics. Models and comparison figures live
+under outputs/models/ and outputs/figures/. Resume rejects changed settings/source.
 
-Before solar screening, fill verified station coordinates and timestamp
-timezone in `data.solar.site`, or supply verified elevation and clear-sky GHI columns.
-No location or timezone is guessed. NOAA solar geometry and Haurwitz clear-sky GHI
-use the existing NumPy dependency.
-The study stops at `selection_frozen` and writes `validation_screening_summary.csv`.
-Resume with `--evaluate-test` to evaluate only the reference and selected arm, without
-retraining. See [feature definitions](docs/data.md) for ratio floors and causal inputs.
+The previous 96-fit hourly result remains in [research](docs/research.md#legacy-hourly-experiment-4-october-2026)
+as a legacy adaptation. It does not use this protocol. Current results are pending.
+Source/license attribution is retained in [data](docs/data.md).
 
-The default budget is at most 24 tuning attempts plus 26 feature fits (18 reference/
-single fits, up to six combinations and two replacement fits). Extra seeds
-are only used for final selected experiments when explicitly requested. Change the
-budget through `tuning` in `config/config.yaml`; disabling tuning reuses configured
-model parameters. The default search spaces are intentionally bounded:
-
-| Model | Tuned parameters |
-| --- | --- |
-| XGBoost | Depth 2-6, learning rate 0.01-0.1, min child weight 1-8, lambda 0.5-10, row/column sampling 0.7-1.0 |
-| CNN-LSTM | Filters 16/32/64, LSTM units 16/32/64, batch 16/32, Adam learning rate 0.0002-0.002 |
-
-Tuning can improve validation performance; it does not guarantee a larger physical
-feature gain or better TEST generalization.
-
-## Project structure
-
-```text
-config/                 Experiment, plant and smoke configurations
-src/
-  data.py               Physics features, loading, chronological windows and scaling
-  models/               CNN-LSTM and XGBoost implementations
-  train.py              TRAIN/VAL fitting and model persistence
-  predict.py            Saved-model TEST inference
-  experiments.py        Feature screening and validation-only selection
-  tuning.py             Bounded TPE search before parameter freezing
-  evaluation.py         Comparison tables, manifest summary and figures
-  metrics.py            Metrics, constraints, health checks and bootstrap
-  runtime.py            Runtime setup, project paths and JSON records
-data/raw/               Local source data
-data/processed/         Regenerated feature tables
-outputs/models/         Saved models and scalers
-outputs/results/        Predictions, metrics and study manifests
-outputs/figures/        Training and comparison figures
-tests/                  Leakage, physics, metrics and prediction checks
-docs/                   Data contract and research protocol
-```
-
-The main study directory contains `manifest.json`, `model_comparison.csv`,
-`feature_ablation.csv`, `validation_screening_summary.csv` and correlation tables.
-The manifest holds the selected features, full screening records and machine-readable
-summary. MAE and RMSE use kW; `nRMSE_cap` uses the configured 7.44 kW
-DC nameplate. Horizon `0` means the average of per-horizon metrics.
-
-`tuning_results.csv` lists all tuning attempts and the selected trial for each model;
-`frozen_config.yaml` stores the parameters used by the subsequent feature experiments.
-
-Training and prediction details are grouped under `outputs/results/STUDY_ID/runs/RUN_ID/`.
-Training stores `train.log`, `history.json` and `validation_health.csv`; prediction
-stores `predictions.csv`, `metrics.csv` and `metadata.json`, with forecast health
-embedded in metadata. Standalone runs use `outputs/results/RUN_ID/`.
-Predictions are exported once as CSV. Existing flat-layout results remain readable.
-New runs no longer produce duplicate `results.csv`, `validation_screening.csv`,
-`selection.json` or prediction HDF5 files.
-
-The summary labels small MAE effects (below 1%), metric tradeoffs, uncertain effects,
-improvement and degradation. This descriptive threshold is fixed before training and
-never affects parameter or feature selection. Conclusions remain single-seed results.
-The manifest preserves commands, effective configurations, Git state, source text/diff,
-checkpoints and failed/interrupted attempts. Resume rejects changed source or settings;
-older studies should be read as archived results, not resumed through v2.0.
-
-See [data and feature documentation](docs/data.md) for the input contract and source
-attribution. See the [research protocol](docs/research.md) for selection, evaluation
-and interpretation rules.
-
-## Attribution
-
-SOLETE data and the adapted physical-feature implementation originate from Daniel
-Vazquez Pombo and collaborators. Full dataset and license details are preserved in
-[docs/data.md](docs/data.md).
+The five-minute study `20261004_163215_553398_physics_tpe` is running with the
+fixed 320-fit budget. [Current manifest](outputs/results/20261004_163215_553398_physics_tpe/manifest.json).
+It uses 91,951 / 26,265 / 13,103 common TRAIN/VAL/TEST origins. No final TEST
+comparison exists until all eight configurations freeze and evaluation completes.

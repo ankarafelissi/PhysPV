@@ -65,6 +65,8 @@ def build_model(params, input_shape, horizon):
         model.add(layers.MaxPooling1D(params['pool_size'], padding='same'))
     for i, units in enumerate(neurons):
         model.add(layers.LSTM(units, activation=params['lstm_activation'], return_sequences=i < len(neurons)-1))
+    for units in params.get('dense_neurons', []):
+        model.add(layers.Dense(units, activation=params['lstm_activation']))
     model.add(layers.Dense(horizon, activation='linear'))
     model.compile(
         optimizer=build_optimizer(params['optimizer']),

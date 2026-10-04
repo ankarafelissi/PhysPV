@@ -48,7 +48,7 @@ class PredictionTests(unittest.TestCase):
         self.assertEqual(result['predicted'].shape, self.splits['TEST']['Y'].shape)
         result_dir = result['metadata_path'].parent
         self.assertEqual({p.name for p in result_dir.iterdir()},
-                         {'predictions.csv', 'metrics.csv', 'metadata.json'})
+                         {'predictions.csv', 'metrics.csv', 'raw_target_metrics.csv', 'metadata.json'})
         metadata = json.loads(result['metadata_path'].read_text(encoding='utf-8'))
         self.assertEqual(len(metadata['forecast_health']), 2 * self.config['data']['horizon'])
         self.assertEqual({p.name for p in (self.root / 'outputs').iterdir()}, {'models', 'figures', 'results'})
@@ -88,7 +88,7 @@ class PredictionTests(unittest.TestCase):
 
     def test_incompatible_contract_is_rejected_before_model_loading(self):
         config = copy.deepcopy(self.config)
-        config['data']['features'].reverse()
+        config['data']['features'].append('HUMIDITY[%]')
         with patch('src.models.load_model') as loader:
             with self.assertRaisesRegex(ValueError, 'incompatible'):
                 run(self.root, config)

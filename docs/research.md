@@ -1,348 +1,215 @@
-# Research Protocol
+# Research protocol: five-minute physics-guided TPE
 
-## Question
+## Objective and reference
 
-The study tests whether physics-informed feature expansion and model-specific feature
-selection improve short-term PV forecasting across XGBoost and CNN-LSTM. Persistence
-is the deterministic reference. PI denotes additional physical inputs, not a new model
-architecture or loss function.
+Physics defines the admissible feature space; bounded TPE jointly chooses feature
+subsets, PRE and model hyperparameters. Compare Original, Expanded-Pearson,
+Expanded-Physics and Intrinsic for XGBoost and CNN_LSTM, plus Persistence.
+Negative and mixed outcomes are valid. This estimates search-space design plus
+model adaptation, not isolated feature causality or a guaranteed Physics ranking.
 
-## Experimental controls
+The primary reference is [Pombo et al., Energy Reports 2022](https://doi.org/10.1016/j.egyr.2022.05.006),
+Sections 3–5. Use five-minute resolution, H=60 (five hours), chronological
+70/20/10 and PRE candidates equal to the union of its coarse/fine grids:
+0/5/10/15/20/25/30/35/40/45/50/60/70/80/90/100/110/120. PRE counts previous
+samples in addition to the current sample; PRE=30 means 150 minutes.
 
-Version 2.0 uses a bounded Optuna TPE search on the non-PI reference before feature
-selection. Each family receives 12 attempts with identical seed and partitions;
-the existing configuration is the first candidate. The objective is validation MAE
-averaged over horizons in kW. Failed trials are retained and count toward the budget.
-All physical feature arms subsequently use the winning parameters unchanged.
-Tuning is a preparation step; the research question concerns physical features.
+## Feature spaces and model search
 
-- Use one fixed seed: `11`.
-- Preserve chronological TRAIN/VAL/TEST partitions.
-- Fit scalers and scenario thresholds on TRAIN only.
-- Train and early-stop with TRAIN/VAL only.
-- Select hyperparameters and feature subsets with VAL only.
-- Evaluate TEST only after the selected subset is frozen.
-- Keep the reference features, forecast origins and targets identical across arms.
-- Treat smoke runs as execution checks, never performance evidence.
+Historical target power is mandatory. Original has six optional weather inputs:
+ambient temperature, humidity, wind speed/direction, GHI and POA. Pressure is
+excluded. Expanded adds Pac, Pdc, TempModule, TempCell, MinutesOfDay (0–287)
+and HoursOfDay (0–23). Pearson uses absolute TRAIN target correlation >=0.7,
+with humidity explicitly retained as in the reference. It is refitted on TRAIN,
+so its actual pool need not equal the paper's fixed list. Physics retains humidity,
+POA, Pac, TempCell and HoursOfDay; Intrinsic has no optional inputs.
 
-The default path screens single-feature additions first. A single becomes a winner
-only when `100 * (1 - candidate_VAL_MAE / reference_VAL_MAE) > 0.5`, separately
-for each model. Rank winners by VAL MAE, with arm ID resolving ties. Try at most
-three pairs from the top three winners in ranked order; two winners permit one pair
-and fewer than two skip combinations. Then try exactly one predeclared replacement:
-replace EPOA/GHI/Hday with Pac/clear-sky index/solar elevation. Keep model parameters,
-seed and forecast origins fixed through every stage. Do not revisit HPO.
+Seed 11; exactly 40 attempts per model/space, including ten startup attempts:
+320 fits total. The first attempt uses all pool features, PRE=30 and YAML defaults.
+Every optional input has a Boolean inclusion variable; empty subsets are allowed.
+Failed/interrupted attempts consume the budget and remain recorded. There is no
+TEST-driven budget extension or retuning. This remains a bounded search, not proof
+of convergence or a global optimum.
 
-Final selection compares the reference, winner singles, combinations and replacement
-on VAL MAE, preferring the reference on an exact tie, then fewer inputs and arm ID.
-Non-winning singles remain in the manifest but are excluded from final selection.
-The study stops with `selection_frozen`; TEST inference requires `--evaluate-test`.
-If the reference wins, evaluate it once and retain the no-improvement finding.
-XGBoost and CNN-LSTM may select different subsets. Selection never requires matching
-cross-model trends. Historical studies below used the previous PI-only selection rule.
+XGBoost uses independent direct ensembles at each of 60 horizons: 700-tree ceiling,
+depth 2–6, learning rate 0.01–0.1, child weight 1–8, lambda 0.5–10, row/column
+sampling 0.7–1; VAL early stopping at 40 rounds. GPU hist is enabled after a local
+compatibility check. CNN_LSTM searches filters 16/32/48, kernel/pool sizes 1–7,
+1–3 LSTM layers with 5–20 equal-width units, 0–2 dense layers with 1–5 units,
+batch 16/32 and Adam learning rate 0.0002–0.002. MAE training loss, 1000-epoch
+ceiling and 20-epoch VAL-MAE patience are fixed. Kernel padding is causal.
+TensorFlow 2.10 currently runs on CPU. TPE, early stopping, tied LSTM widths,
+and XGBoost replacing RF are explicit adaptations; no additional model family.
 
-## Metrics
+## Data, target processing and evaluation
 
-Report MAE, RMSE, capacity-normalized RMSE and R2 for every forecast horizon. Horizon
-`0` in summary tables is the arithmetic mean of the per-horizon scores. RMSE is
-calculated separately at each horizon as `sqrt(mean(error^2))`.
+Read SOLETE_Pombo_5min.h5 without changing the source file. Its local timestamps
+span 2018-06-01 to 2019-09-01 (131617 rows), whereas the paper states
+2019-06-01 to 2020-08-31 (131616 rows). Retain actual timestamps and record this
+discrepancy; no undocumented year shifting or claim of matching acquisition dates.
+Sort/reindex the continuous timeline; reject duplicate times. Missing physical
+inputs invalidate windows. Input/target windows never cross gaps or target split
+boundaries. Maximum PRE=120 and full raw-candidate validity define common origins.
+Scalers and Pearson selection use TRAIN only. VAL/TEST may use observed earlier
+context. No future weather or power enters model inputs.
 
-Feature ablation reports selected PI minus non-PI MAE, so a negative value favors the
-PI model. Paired circular block bootstrap intervals resample forecast origins and use
-the configured 2,000 resamples and block length of 24. These intervals describe the
-single fixed-seed run; they do not estimate seed-to-seed uncertainty.
+Plant Table 1: 200 W modules, 18 series x 2 parallel, DC nameplate 7.2 kW;
+a=-3.56, b=-0.075, cell delta=3 C, gamma=-0.00478/C, AC capacity 10 kW.
+Use constant inverter efficiency 0.98, predeclared from the public SMA curve;
+the paper does not specify its numeric maximum. The public v3.0 example instead
+has 165 W and 125 W arrays totalling 7.44 kW; these are not silently mixed.
 
-## Diagnostics and interpretation
+The default target estimates available power. For finite Pac>0.05 kW, replace a
+measurement if abs(measured-Pac)/Pac>0.2. Fill missing target from finite Pac and
+set target/Pac <=0.001 kW to zero. This is an explicit interpretation of the
+paper's >20% deviation prose, not its unpublished original cleaning code. The
+public v3.0 example uses a different one-sided 1.5x threshold. Save untouched
+measurements in observed_power_raw and export raw_target_metrics.csv to expose
+sensitivity to target correction. Corrected outcomes are partly physics-derived;
+any apparent Physics advantage must be interpreted with that dependence in mind.
 
-Forecast health checks reject non-finite output and constant prediction heads when the
-target varies. Night-only constant-zero targets remain valid. Raw forecasts are the
-primary evidence; constrained forecasts are supplementary.
+Do not invent undocumented detrending/outlier thresholds. The paper mentions
+clear-sky detrending and outlier removal without a fully executable specification;
+this implementation keeps raw irradiance and finite continuous samples. Those
+remain reproduction limitations alongside year labels and model differences.
 
-Correlation and physical-redundancy tables are TRAIN-only diagnostics. Scenario labels
-use TRAIN-fitted thresholds and are descriptive post-hoc analyses. Future ramp labels
-never enter model inputs.
+Training/checkpoint MAE uses all finite windows. Primary selection uses mean
+per-horizon VAL RMSE over geometric daylight target timestamps (solar elevation>0).
+Freeze all eight winners before TEST. TEST uses exactly the same daylight rule,
+not a threshold chosen from TEST power. Night history remains available and target
+windows retain their true timing. Report kW MAE/RMSE, correct R2 and nRMSE divided
+by the predeclared 10 kW AC rating, plus raw-target sensitivity and Persistence.
+Normalization is explicitly stated because the paper does not fully specify its
+percentage denominator. Horizon 0 in tables averages per-horizon scores.
 
-Positive, negative and mixed results must all be retained. A lower MAE with a higher
-RMSE is a metric-dependent result, not a general improvement. A single seed supports
-one reproducible comparison and must not be described as publication-level evidence
-of stability.
+Physics-minus-baseline paired MAE intervals use evaluated daylight records,
+averaged by origin and circular block bootstrap (2000 resamples, seed 2026,
+288 origins or at least H). These are conditional temporal intervals, not seed
+or search uncertainty or multiple-comparison-adjusted inference. Equal attempts
+do not imply equal time or convergence. Results must not be forced to match paper.
 
-Each study stores its frozen configuration, configured input path, runtime environment,
-partition boundaries, selected features and run links in
-`outputs/results/STUDY_ID/manifest.json`. Changing source code or input data requires a
-new training study.
+## Reproducibility and status
 
-The manifest summary reports relative MAE/RMSE changes and paired MAE intervals.
-MAE changes below 1% are labeled small effects; opposing MAE/RMSE directions are
-metric tradeoffs; intervals crossing zero are uncertain. The threshold is descriptive,
-not a selection criterion. No trend or practical improvement is guaranteed.
-No per-run Markdown summary is created. Failed/interrupted attempts and retries remain
-in the existing manifest with distinct readable run IDs. Source text and Git diff are
-recorded without file digests or cryptographic checks.
+The existing manifest keeps effective configs, source text/diff, Git commit/dirty
+state, command, input metadata, seed, attempts, logs/checkpoints and lifecycle.
+Resume requires unchanged source/config/environment/input. Changes start new IDs;
+old attempts and artifacts are not overwritten. No hashes or per-run Markdown.
 
-## Initial v2.0 experiment (3 October 2026)
+The previous hourly study below is retained as historical evidence of the earlier
+adaptation. It is not a result of the current five-minute protocol and cannot be
+compared numerically with the reference. The new study's status and results will
+be recorded here after execution; TEST stays closed until all configurations freeze.
 
-Study `20261003_005317_360657_features` completed from clean commit
-`78580418f4ac9e20f6d9f1e3d98248b3e6ba3813` using
-`python main.py --feature-study`. All 24 tuning attempts, 16 feature-screening fits
-and four final predictions completed. Training used CPU and seed 11. The study's
-frozen configuration and machine-readable diagnostics remain in its existing manifest.
+### Current five-minute run (4 October 2026)
 
-The hourly dataset produced 7,644 TRAIN, 2,185 VAL and 1,088 TEST forecast origins,
-with 25 historical observations and forecasts one to ten hours ahead. TEST targets
-span 17 July to 1 September 2019. TPE reduced validation MAE by 1.70% for XGBoost
-and 2.07% for CNN-LSTM relative to each family's initial configuration.
+Study `20261004_163215_553398_physics_tpe`; fixed seed-11 budget of 320 attempts.
+[Manifest](../outputs/results/20261004_163215_553398_physics_tpe/manifest.json),
+[trial table](../outputs/results/20261004_163215_553398_physics_tpe/tuning_results.csv).
+Status: **started**, checked 2026-10-04 17:13:51 local.
+Training attempts: 14 completed, 0 failed,
+0 interrupted, 1 currently started.
+TEST evaluations: 0/8. TRAIN/VAL/TEST common origins:
+91,951 / 26,265 / 13,103. The TRAIN-fitted Pearson pool matches the reference's
+named humidity/GHI/POA/Pac/Pdc/TempModule/TempCell list. Correction changed
+5,653 rows (mean absolute change 0.00835 kW); preprocessing_audit.csv holds counts.
+Compilation, 45 unit tests and the 8-fit/8-prediction smoke passed before launch.
+Smoke outputs are execution diagnostics only. Source/config remain frozen.
 
-XGBoost selected depth 5, learning rate 0.01979, minimum child weight 6 and lambda
-0.88370, with row/column sampling 0.82114/0.79227. The 700-tree ceiling and
-40-round early stopping remained fixed. CNN-LSTM selected 16 convolution filters,
-16 LSTM units, batch size 16 and Adam learning rate 0.00036457, with a 120-epoch
-ceiling and patience 12. Exact settings are saved in `frozen_config.yaml`.
+Final TEST results remain pending. No result ranking is inferred during search.
 
-### Feature screening on VAL
+## Legacy hourly experiment (4 October 2026)
 
-Positive changes below mean higher MAE than the tuned non-PI reference.
+Study `20261004_140151_675271_physics_tpe` completed with seed 11: 96/96 successful training
+attempts, eight successful frozen TEST evaluations, and no failed/interrupted
+attempts. Unit verification passed 43 tests; compilation and the four-space
+end-to-end diagnostic also passed. The final audit confirmed source immutability,
+saved/frozen config equality, all log paths and identical TEST partitions.
+TRAIN/VAL/TEST used 7,620 / 2,185 / 1,088 common forecast origins.
 
-| Feature addition | XGBoost MAE change | CNN-LSTM MAE change |
-| --- | ---: | ---: |
-| PAC | +0.39% | +2.88% |
-| PDC | +0.35% | +3.06% |
-| Tm | +1.58% | +1.61% |
-| Tc | +0.53% | +1.70% |
-| PAC + Tc | +0.69% | +0.82% |
-| PDC + Tc | +0.51% | +0.72% |
-| Full physics set | +1.70% | +9.91% |
+[Manifest](../outputs/results/20261004_140151_675271_physics_tpe/manifest.json), [all trials](../outputs/results/20261004_140151_675271_physics_tpe/tuning_results.csv),
+[frozen configs](../outputs/results/20261004_140151_675271_physics_tpe/frozen_config.yaml), [full comparison](../outputs/results/20261004_140151_675271_physics_tpe/model_comparison.csv),
+[paired differences](../outputs/results/20261004_140151_675271_physics_tpe/physics_comparison.csv).
 
-Every tested PI arm was worse than its reference on VAL. PDC was the least harmful
-PI candidate for XGBoost; PDC + Tc was the least harmful for CNN-LSTM. The PI-only
-selection therefore does not imply that either candidate outperformed the baseline.
+### Frozen configurations and search cost
 
-### Final TEST comparison
+Historical measured PV power is mandatory and omitted from the optional-subset
+column below. Trial numbers here are one-based; CSV/manifest numbers are zero-based.
 
-These are raw forecasts, with metrics averaged over the ten horizons. Normalized
-RMSE uses the configured 7.44 kW DC nameplate, not a confirmed inverter AC limit.
+| Model | Space | Trial | PRE | Optional subset | VAL RMSE (kW) | Search training time (min) |
+| --- | --- | ---: | ---: | --- | ---: | ---: |
+| XGBoost | Original | 1 | 24 | TEMPERATURE[degC], HUMIDITY[%], WIND_SPEED[m1s], WIND_DIR[deg], GHI[kW1m2], POA Irr[kW1m2], Pressure[mbar] | 0.794919 | 2.17 |
+| XGBoost | Expanded-Pearson | 6 | 48 | HUMIDITY[%] | 0.803950 | 1.65 |
+| XGBoost | Expanded-Physics | 12 | 48 | HUMIDITY[%], POA Irr[kW1m2], Pac, TempCell, HoursOfDay | 0.795757 | 1.92 |
+| XGBoost | Intrinsic | 8 | 48 | None | 0.791463 | 0.66 |
+| CNN_LSTM | Original | 2 | 24 | TEMPERATURE[degC], POA Irr[kW1m2], Pressure[mbar] | 0.813407 | 15.87 |
+| CNN_LSTM | Expanded-Pearson | 3 | 48 | TEMPERATURE[degC], HUMIDITY[%], GHI[kW1m2], Pac, Pdc, TempModule, TempCell | 0.811113 | 19.62 |
+| CNN_LSTM | Expanded-Physics | 12 | 48 | HUMIDITY[%] | 0.834170 | 28.21 |
+| CNN_LSTM | Intrinsic | 11 | 48 | None | 0.834517 | 24.48 |
 
-| Model | Feature arm | MAE (kW) | RMSE (kW) | nRMSE (%) | R2 |
+Total measured model-fitting time was 94.58 minutes on CPU;
+these times exclude preprocessing, checkpoint persistence and reporting.
+The smaller physical feature space did not imply lower CNN_LSTM wall-clock cost:
+its sampled configurations took longer to train than those of the larger spaces.
+
+The overall **VAL-selected spaces remain XGBoost Intrinsic and CNN_LSTM
+Expanded-Pearson**. They were not changed after TEST. XGBoost Original won
+within its space using the initial configuration, so TPE did not improve every
+space over its starting trial. Twelve attempts do not establish search convergence.
+
+### TEST comparison
+
+All entries are raw all-hour scores averaged over the ten individual horizons.
+
+| Model | Space | MAE (kW) | RMSE (kW) | nRMSE (%) | R2 |
 | --- | --- | ---: | ---: | ---: | ---: |
-| Persistence | Persistence | 1.5223 | 2.0611 | 27.7033 | -0.7946 |
-| XGBoost | Non-PI reference | 0.3797 | 0.7069 | 9.5015 | 0.8083 |
-| PI-XGBoost | PDC addition | 0.3788 | 0.7044 | 9.4684 | 0.8097 |
-| CNN-LSTM | Non-PI reference | 0.4147 | 0.7630 | 10.2556 | 0.7767 |
-| PI-CNN-LSTM | PDC + Tc addition | 0.4144 | 0.7669 | 10.3075 | 0.7750 |
+| XGBoost | Original | 0.384247 | 0.705127 | 9.478 | 0.809386 |
+| XGBoost | Expanded-Pearson | 0.400313 | 0.727018 | 9.772 | 0.796832 |
+| XGBoost | Expanded-Physics | 0.387190 | 0.713404 | 9.589 | 0.804806 |
+| XGBoost | Intrinsic | 0.393561 | 0.726474 | 9.764 | 0.797114 |
+| CNN_LSTM | Original | 0.428945 | 0.763137 | 10.257 | 0.777946 |
+| CNN_LSTM | Expanded-Pearson | 0.430525 | 0.749693 | 10.077 | 0.782953 |
+| CNN_LSTM | Expanded-Physics | 0.431375 | 0.813828 | 10.939 | 0.745493 |
+| CNN_LSTM | Intrinsic | 0.421764 | 0.765808 | 10.293 | 0.776958 |
+| Persistence | Persistence | 1.522309 | 2.061128 | 27.703 | -0.794566 |
 
-The selected PI-XGBoost arm reduced MAE by 0.22% and RMSE by 0.35%; its paired
-95% MAE-difference interval was [-0.00213, 0.00050] kW. PI-CNN-LSTM reduced MAE
-by 0.08% but increased RMSE by 0.51%; its interval was [-0.00544, 0.00487] kW.
-Both intervals include zero. The manifest's numerical `improvement` MAE direction
-does not establish a reliable improvement: both effects are classified as small,
-and CNN-LSTM has opposing MAE/RMSE directions.
+### Physical-space comparisons
 
-TRAIN Pearson correlation was 0.99973 between PAC/PDC and 0.99912 between Tm/Tc.
-This supports physical redundancy as a plausible explanation, rather than proving
-it caused the observed degradation. Both model families already receive measured
-irradiance, ambient temperature, wind speed and historical PV power. The derived
-features re-express available information; they do not add future weather data.
-All-at-once expansion was especially harmful to CNN-LSTM on VAL, while its selected
-combination was less harmful than either corresponding single addition. Feature
-effects therefore depend on the model and combination, even without a net benefit.
+Differences below are Physics minus baseline mean MAE; negative favors Physics.
 
-All 400 validation prediction heads passed collapse checks, all 20 CNN-LSTM best
-checkpoints were verified, and all four final forecasts were finite with no all-zero
-horizon. No validation-loss anomaly stop was recorded. Raw CNN-LSTM forecasts
-included small negative values; the separately saved nonnegative forecasts reduced
-baseline/PI MAE to 0.40618/0.40626 kW, respectively. The tiny PI advantage therefore
-also changes direction under this supplementary constraint.
+| Model | Baseline | MAE difference (kW) | 95% block-bootstrap interval (kW) |
+| --- | --- | ---: | --- |
+| XGBoost | Original | +0.002943 | [-0.011737, +0.018365] |
+| XGBoost | Expanded-Pearson | -0.013124 | [-0.023345, -0.002217] |
+| XGBoost | Intrinsic | -0.006371 | [-0.018188, +0.005459] |
+| CNN_LSTM | Original | +0.002430 | [-0.026204, +0.029591] |
+| CNN_LSTM | Expanded-Pearson | +0.000850 | [-0.035358, +0.035519] |
+| CNN_LSTM | Intrinsic | +0.009612 | [-0.018210, +0.037861] |
 
-### Conclusion and limits
+XGBoost Expanded-Physics had lower TEST MAE/RMSE than Pearson and Intrinsic,
+but higher errors than Original. Only its MAE contrast against Pearson had a
+bootstrap interval excluding zero; this is conditional on these fitted models
+and is not adjusted for multiple comparisons or search/seed variability.
 
-Under this dataset, split, seed and training budget, both ML families substantially
-outperformed Persistence, and XGBoost had lower errors than CNN-LSTM. Physics-derived
-feature expansion did not demonstrate a reliable additional benefit across the two
-families. This experiment does not substantiate the benchmark's cross-model
-improvement claim in this setting; it does not rule out gains under other conditions.
+CNN_LSTM Expanded-Physics had higher mean TEST RMSE than every alternative.
+Its best subset contained **humidity only besides historical power**: no Pac,
+TempCell, POA or HoursOfDay survived subset selection. It is therefore a winner
+searched inside the physical space, not a fitted model using constructed physics
+features. All its paired mean-MAE intervals included zero. Do not attribute its
+scores to a successful or unsuccessful causal effect of Pac/TempCell inclusion.
 
-The run is exploratory and uses one seed. Fourteen of twenty CNN-LSTM fits reached
-the 120-epoch ceiling, and the final reference/PI best checkpoints occurred at epochs
-119/120. The result is conditional on this budget, not evidence of full convergence
-or globally optimal hyperparameters. There was no runtime defect requiring a retry,
-and TEST was not used to tune another run toward a positive feature result. A future
-training-budget sensitivity study must be declared separately and preserve this run.
+The observed TEST RMSE minima were XGBoost Original and CNN_LSTM Pearson.
+That descriptive ranking does not replace the pre-frozen VAL selection.
+This run provides the requested SOLETE-style four-space result structure, with
+mixed findings rather than a universal advantage for physics-guided screening.
 
-Local evidence: `outputs/results/20261003_005317_360657_features/` contains
-`results.csv`, `model_comparison.csv`, `feature_ablation.csv`,
-`validation_screening_summary.csv`, `tuning_results.csv`, `selection.json`,
-`frozen_config.yaml` and `manifest.json`. The four plot families are available in
-`outputs/figures/20261003_005317_360657_features/` as PNG, PDF and SVG. Generated
-artifacts remain ignored by Git.
+The result is conditional on one seed, one chronological split, H=10, the local
+data period, the original-space weather scope, fixed model families and this
+bounded budget. TRAIN target correlation with Pdc was 0.999990; strong redundancy
+is observable, but its acquisition-level origin and causal role are not established.
 
-## Training-budget follow-up (3 October 2026)
+### Figures
 
-Study `20261003_015328_145601_features` reused the initial study's tuned parameters,
-seed, partitions and all eight feature arms. Only the CNN-LSTM epoch ceiling changed
-from 120 to 240; patience remained 12. TPE was disabled. The prior TEST results had
-already been observed, so this is an exploratory sensitivity study, not independent
-confirmation. The initial study remains intact.
-
-All 16 screening fits and four final predictions completed. The eight XGBoost VAL
-scores reproduced exactly. All eight CNN-LSTM fits stopped normally before epoch
-240, with no validation-loss anomaly stops. All 160 validation prediction heads
-passed health checks, eight best checkpoints were verified, and final forecasts were
-finite without all-zero horizons. Source layout and model code were unchanged.
-
-### What changed with additional training
-
-The CNN-LSTM reference stopped at epoch 208 and restored its epoch-196 checkpoint.
-Validation MAE fell from 0.44441 to 0.43715 kW (-1.64%). TEST MAE fell from 0.41469
-to 0.40691 kW (-1.88%), and RMSE fell from 0.76302 to 0.75042 kW (-1.65%). The
-paired TEST MAE difference between budgets was -0.00778 kW, with a block-bootstrap
-95% interval of [-0.01318, -0.00214] kW. This interval is conditional on the single
-seed and observed TEST period. The initial epoch ceiling did restrict baseline
-performance; extending it produced a measurable improvement in this comparison.
-
-Every CNN-LSTM PI arm nevertheless remained worse than the extended reference on
-VAL. PAC/PDC increased MAE by 4.24%/4.55%, Tm/Tc by 0.97%/0.92%, PAC + Tc/PDC + Tc
-by 1.17%/1.30%, and the full set by 11.74%. The full-set fit stopped at epoch 39
-in both studies and received no benefit from a higher ceiling. Its reported relative
-degradation increased because the reference improved.
-
-CNN-LSTM's selected PI arm changed from PDC + Tc to Tc, demonstrating that feature
-ranking also depends on training budget. Tc restored its epoch-194 checkpoint after
-stopping at epoch 206. XGBoost again selected PDC within the PI candidates. Neither
-PI selection outperformed its reference on VAL.
-
-### Final TEST results with the extended budget
-
-| Model | Feature arm | MAE (kW) | RMSE (kW) | nRMSE (%) | R2 |
-| --- | --- | ---: | ---: | ---: | ---: |
-| Persistence | Persistence | 1.5223 | 2.0611 | 27.7033 | -0.7946 |
-| XGBoost | Non-PI reference | 0.3797 | 0.7069 | 9.5015 | 0.8083 |
-| PI-XGBoost | PDC addition | 0.3788 | 0.7044 | 9.4684 | 0.8097 |
-| CNN-LSTM | Non-PI reference | 0.4069 | 0.7504 | 10.0863 | 0.7835 |
-| PI-CNN-LSTM | Tc addition | 0.4031 | 0.7641 | 10.2698 | 0.7761 |
-
-The XGBoost PI comparison is unchanged: its -0.22% MAE change has an interval
-including zero. CNN-LSTM's selected Tc arm reduced raw MAE by 0.94% but increased
-RMSE by 1.82%; its paired MAE-difference interval was [-0.01363, 0.00567] kW.
-It is a small, uncertain effect with a metric tradeoff. With the same supplementary
-nonnegative constraint applied to both arms, CNN-LSTM baseline/PI MAE was
-0.39950/0.40061 kW, reversing the small raw-MAE advantage.
-
-### Working conclusion
-
-The longer budget improved CNN-LSTM's baseline without establishing a reliable
-physics-feature benefit. Across both budgets, every PI arm was worse on VAL, both
-selected TEST MAE intervals included zero, and PI-CNN-LSTM increased TEST RMSE.
-The appropriate conclusion is that physical feature expansion is not automatically
-beneficial when its measured inputs already enter the model. Feature usefulness
-depends on model class, combination, training budget and evaluation metric. High
-TRAIN feature correlations support redundancy as a plausible explanation, not a
-causal demonstration. These findings do not establish the benchmark's cross-model
-improvement claim in this setting and do not refute its possibility elsewhere.
-
-The tuned non-PI XGBoost is the strongest practical default supported by VAL and has
-lower TEST errors than either CNN-LSTM arm. The extended CNN-LSTM budget is a better
-comparison than the capped initial run. All CNN-LSTM fits now terminated through the
-same early-stopping rule; no further TEST-guided retuning was performed. The one-seed,
-one-site and one-TEST-period limits remain.
-
-The new study directory contains its manifest, `frozen_config.yaml`, the standard
-result tables and `training_budget_comparison.csv` (paired VAL scores for every arm
-under both budgets). Its four figure families are in
-`outputs/figures/20261003_015328_145601_features/`. To repeat this configuration as a
-new run without another TPE search:
-
-```bash
-python main.py --feature-study --config outputs/results/20261003_015328_145601_features/frozen_config.yaml
-```
-
-## Staged system-state and solar-feature study (3 October 2026)
-
-Study `20261003_175357_067013_features` completed with seed 11 on CPU. The user
-supplied latitude 55.6867, longitude 12.0985 and UTC timestamp timezone. A YAML
-indentation error was corrected before starting. TRAIN irradiance/solar alignment
-was checked; the coordinates were not independently surveyed. The chronological
-partitions retained 7,644 TRAIN, 2,185 VAL and 1,088 TEST origins.
-
-The unchanged 12-attempt-per-model TPE procedure selected the same parameter values
-as the initial study. CNN-LSTM used the current YAML's 120-epoch ceiling, rather
-than the separate 240-epoch follow-up budget. Parameters were frozen before all
-feature experiments. The 24 tuning fits, 18 reference/single-feature fits, one
-winner-combination fit, two replacement fits and three TEST predictions all
-completed: 48 attempts, zero failures or interruptions. Commands, dirty source
-snapshot/diff, effective configurations and artifact paths remain in the
-[existing manifest](../outputs/results/20261003_175357_067013_features/manifest.json).
-
-### VAL screening and selection
-
-The reference MAE was 0.430659 kW for XGBoost and 0.444413 kW for CNN-LSTM.
-The table reports percentage MAE change relative to each reference: negative
-values are improvements. Candidate eligibility required an improvement strictly
-greater than 0.5%.
-
-| Feature or experiment | XGBoost MAE change | CNN-LSTM MAE change |
-| --- | ---: | ---: |
-| Pac | +0.39% | +2.88% |
-| Pdc | +0.35% | +3.06% |
-| TempModule | +1.58% | +1.61% |
-| TempCell | +0.53% | +1.70% |
-| physics_residual | +0.39% | +2.65% |
-| performance_ratio | +0.28% | +10.18% |
-| clear_sky_index | -1.31% | +1.45% |
-| solar_elevation | -2.91% | +0.90% |
-| solar_elevation + clear_sky_index | -2.94% | Not eligible |
-| Physics replacement | -0.27% | +5.48% |
-
-Only solar elevation and clear-sky index qualified for XGBoost, permitting one
-winner pair. Their combination was selected with VAL MAE 0.417995 kW. Its gain
-over solar elevation alone (0.418130 kW) was only about 0.03%; this does not establish
-a meaningful synergy. CNN-LSTM had no qualifying singles, skipped combinations,
-and selected its reference. Replacement removed EPOA/GHI/Hday and inserted
-Pac/clear-sky index/solar elevation, retaining the common historical inputs.
-The full [VAL table](../outputs/results/20261003_175357_067013_features/validation_screening_summary.csv)
-retains all negative results.
-
-### Frozen TEST evaluation
-
-The study first stopped at `selection_frozen`. TEST was then opened through a
-separate `--resume ... --evaluate-test` command. Only the XGBoost reference,
-its frozen combination and the CNN-LSTM reference were evaluated; no rejected
-features were subsequently tested or reselected.
-
-| Model and selected inputs | MAE (kW) | RMSE (kW) | nRMSE (%) | R2 |
-| --- | ---: | ---: | ---: | ---: |
-| Persistence | 1.522309 | 2.061128 | 27.703330 | -0.794566 |
-| XGBoost reference | 0.379664 | 0.706911 | 9.501490 | 0.808325 |
-| XGBoost solar elevation + clear-sky index | 0.385183 | 0.723707 | 9.727251 | 0.799235 |
-| CNN-LSTM reference | 0.414687 | 0.763020 | 10.255641 | 0.776709 |
-
-The XGBoost combination's TEST MAE increased 1.45% and RMSE increased 2.38%.
-Its paired mean MAE difference was +0.005519 kW, with a 95% circular block
-bootstrap interval of [-0.007544, +0.019276] kW (2,000 resamples, 24-origin blocks).
-The interval includes zero: there is no demonstrated generalization improvement
-or statistically resolved degradation. Only the one-hour MAE improved (-2.71%);
-the remaining nine horizons worsened. The [TEST comparison](../outputs/results/20261003_175357_067013_features/model_comparison.csv)
-and [paired intervals](../outputs/results/20261003_175357_067013_features/feature_ablation.csv)
-preserve the quantitative results. CNN-LSTM's zero difference reflects selection
-of the same reference, not an independent PI improvement.
-
-### Interpretation and limits
-
-Solar geometry and clear-sky normalization helped XGBoost on VAL, but that gain
-did not transfer to TEST. System-state residual and performance ratio did not
-help either model on VAL; all tested additions and replacement harmed CNN-LSTM.
-These are model-, site-, period- and seed-specific findings, not a universal
-ranking of physical features.
-
-TRAIN Pac and measured power had Pearson correlation 0.999724. The residual
-standard deviation was only 0.038265 kW, supporting redundancy as one plausible
-explanation. The performance-ratio 95th percentile was 2.1308 for Pac >0.05 kW,
-versus 1.1770 for Pac >0.5 kW, showing that low denominators amplify variation.
-These descriptive thresholds were not used to retune the feature floors.
-The TRAIN statistics do not prove the cause of model degradation.
-
-Eight of ten CNN-LSTM feature fits reached the 120-epoch ceiling. Performance
-ratio stopped at 45 epochs and replacement at 39. Thus its negative feature
-results remain conditional on this budget; they are not a converged-capacity
-assessment and should not be directly compared with the earlier 240-epoch study.
-The Haurwitz clear-sky reference also omits site-specific aerosol and turbidity.
-No extra seeds, TEST-guided tuning or new model families were introduced.
+[Horizon errors](../outputs/figures/20261004_140151_675271_physics_tpe/forecast_horizon_error.png),
+[optimization progress](../outputs/figures/20261004_140151_675271_physics_tpe/optimization_progress.png),
+[prediction curves](../outputs/figures/20261004_140151_675271_physics_tpe/prediction_curves.png).
+The PNG exports were visually checked; matching editable SVG and vector PDF exports are available.

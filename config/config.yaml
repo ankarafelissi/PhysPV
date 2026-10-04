@@ -2,38 +2,42 @@
 seed: 11
 
 tuning:
-  enabled: true
-  trials_per_model: 12
-  startup_trials: 4
+  trials_per_space: 40
+  pre_choices: [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 60, 70, 80, 90, 100, 110, 120]
+  startup_trials: 10
 
 data:
-  path: data/raw/SOLETE_Pombo_60min.h5
-  processed_path: data/processed/solete_hourly_features.h5
-  resolution: 60min
+  path: data/raw/SOLETE_Pombo_5min.h5
+  processed_path: data/processed/solete_5min_features.h5
+  resolution: 5min
   target: P_Solar[kW]
-  features:
-    - TEMPERATURE[degC]
-    - HUMIDITY[%]
-    - WIND_SPEED[m1s]
-    - P_Solar[kW]
-  pre: 24
-  horizon: 10
+  features: ["P_Solar[kW]"]
+  pre: 30
+  horizon: 60
   split: [0.7, 0.2, 0.1]
   scaler: MinMax01
-  correct_power: false
+  correct_power: true
+  power_correction:
+    # Explicit interpretation of the paper's >20% deviation rule.
+    relative_deviation: 0.2
+    minimum_pac_kw: 0.05
+    zero_floor_kw: 0.001
+  evaluation:
+    daylight_only: true
+    normalization_kw: 10.0
   physics: false
   candidate_subset: []
   ratio_floors:
     pac_kw: 0.05
     clear_ghi_kw_m2: 0.02
   solar:
-    # SOLETE / SYSLAB, DTU Risø, Roskilde, Denmark
+    # SOLETE / SYSLAB, DTU Ris酶, Roskilde, Denmark
     site:
       latitude: 55.6867
       longitude: 12.0985
       timezone: UTC
 
-  p_nom_kw: 7.44
+  p_nom_kw: 7.2
   plant_path: config/plant.yaml
   constraints:
     nonnegative: true
@@ -42,11 +46,13 @@ data:
 model: CNN_LSTM
 models:
   CNN_LSTM:
-    epochs: 120
+    epochs: 1000
     batch_size: 16
-    filters: 16
+    filters: 32
     kernel_size: 3
-    neurons: [32]
+    pool_size: 2
+    neurons: [10, 10]
+    dense_neurons: []
     cnn_activation: tanh
     lstm_activation: tanh
     output_activation: linear
@@ -55,7 +61,7 @@ models:
       name: adam
       learning_rate: 0.0007
       clipnorm: 1.0
-    patience: 12
+    patience: 20
     verbose: 0
   XGBoost:
     n_estimators: 700
@@ -66,7 +72,7 @@ models:
     min_child_weight: 3
     reg_lambda: 2.0
     objective: reg:squarederror
-    tree_method: hist
+    tree_method: gpu_hist
     n_jobs: 2
     early_stopping_rounds: 40
 
@@ -75,30 +81,10 @@ output_dir: outputs
 study:
   bootstrap_resamples: 2000
   bootstrap_seed: 2026
-  bootstrap_block_length: 24
+  bootstrap_block_length: 288
   min_test_origins: 500
 
 experiment:
-  reference_features: ['POA Irr[kW1m2]', 'GHI[kW1m2]', HoursOfDay]
-  min_improvement_percent: 0.5
-  max_combinations: 3
-  physics_candidates:
-    - id: add_pac
-      add: [Pac]
-    - id: add_pdc
-      add: [Pdc]
-    - id: add_tm
-      add: [TempModule]
-    - id: add_tc
-      add: [TempCell]
-    - id: add_physics_residual
-      add: [physics_residual]
-    - id: add_performance_ratio
-      add: [performance_ratio]
-    - id: add_clear_sky_index
-      add: [clear_sky_index]
-    - id: add_solar_elevation
-      add: [solar_elevation]
-  physics_replacement:
-    remove: ['POA Irr[kW1m2]', 'GHI[kW1m2]', HoursOfDay]
-    add: [Pac, clear_sky_index, solar_elevation]
+  # Absolute contemporaneous target correlation, fitted on TRAIN only.
+  pearson_threshold: 0.7
+  pearson_force_include: ["HUMIDITY[%]"]

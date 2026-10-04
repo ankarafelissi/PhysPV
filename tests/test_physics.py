@@ -18,6 +18,7 @@ class PhysicsTests(unittest.TestCase):
     def setUp(self):
         self.config = load_config('config/config.yaml')
         self.data = self.config['data']
+        self.data['correct_power'] = False
         self.data.pop('candidate_subset')
         n = 120
         self.frame = pd.DataFrame({
@@ -93,8 +94,8 @@ class PhysicsTests(unittest.TestCase):
         self.data['p_nom_kw'] = 10
         with self.assertRaisesRegex(ValueError, 'nameplate'):
             validate_config(self.config)
-        self.data['p_nom_kw'] = 7.44
-        self.data['correct_power'] = True
+        self.data['p_nom_kw'] = 7.2
+        self.data['correct_power'] = 'yes'
         with self.assertRaisesRegex(ValueError, 'correct_power'):
             validate_config(self.config)
 
@@ -104,10 +105,34 @@ class PhysicsTests(unittest.TestCase):
         np.testing.assert_array_equal(raw, [[-1., 9.]])
         np.testing.assert_array_equal(result, [[0., 9.]])
         self.data['constraints']['capacity'] = True
+        self.data['plant']['ac_capacity_kw'] = None
         with self.assertRaisesRegex(ValueError, 'capacity'):
             constrain_power(raw, self.data)
         self.data['plant']['ac_capacity_kw'] = 8.
         np.testing.assert_array_equal(constrain_power(raw, self.data), [[0., 8.]])
+
+    def test_correction_preserves_raw_and_is_shared_by_spaces(self):
+        self.data['correct_power'] = True
+        frame = self.frame.copy()
+        frame['P_Solar[kW]'] = 0.
+        original = frame.copy(deep=True)
+        off = build_features(frame, self.data)
+        self.data['physics'] = True
+        on = build_features(frame, self.data)
+        pd.testing.assert_frame_equal(frame, original)
+        np.testing.assert_array_equal(off['observed_power_raw'], frame['P_Solar[kW]'])
+        np.testing.assert_array_equal(off['P_Solar[kW]'], on['P_Solar[kW]'])
+        self.assertGreater(off.attrs['power_correction']['replaced_rows'], 0)
+
+    def test_daylight_metrics_exclude_only_masked_target_times(self):
+        observed = np.array([[1., 2.], [100., 200.], [3., 4.]])
+        predicted = observed.copy()
+        predicted[1] = 0.
+        mask = np.array([[True, True], [False, False], [True, True]])
+        scores = evaluate(observed, predicted, observed, 10., mask=mask)
+        self.assertTrue((scores.RMSE == 0).all())
+        self.assertTrue((scores.n == 2).all())
+        self.assertGreater(evaluate(observed, predicted, observed, 10.).RMSE.max(), 0)
 
     def test_nrmse_and_paired_bootstrap(self):
         y = np.zeros((20, 2))

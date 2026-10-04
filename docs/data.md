@@ -1,73 +1,58 @@
-# Data and Features
+# Data and features
 
-## Input contract
+## Input and timing
 
-The pipeline reads one numeric HDF5 table with a `DatetimeIndex`. Timestamps are
-sorted, duplicate timestamps are rejected, and missing intervals remain missing.
-Raw observations are never rewritten.
+The current input is data/raw/SOLETE_Pombo_5min.h5, a numeric HDF5 table with
+unique DatetimeIndex. It has 131617 rows, from 2018-06-01 to 2019-09-01.
+The reference's date labels and count differ; actual timestamps are preserved.
+The source file is never modified. Sort and reindex five-minute gaps as NaN.
+The tracked SOLETE_short.h5 is only an execution fixture.
 
-| Column | Meaning |
-| --- | --- |
-| `P_Solar[kW]` | Measured PV-power target in kW |
-| `POA Irr[kW1m2]` | Plane-of-array irradiance in kW/m2 |
-| `GHI[kW1m2]` | Global horizontal irradiance in kW/m2 |
-| `TEMPERATURE[degC]` | Ambient temperature |
-| `WIND_SPEED[m1s]` | Wind speed |
-| `HUMIDITY[%]` | Relative humidity |
+Target P_Solar[kW]; weather inputs POA Irr[kW1m2], GHI[kW1m2], TEMPERATURE[degC],
+WIND_SPEED[m1s], WIND_DIR[deg], HUMIDITY[%]. Pressure, wind power and recorded
+azimuth/elevation are outside the default feature spaces.
 
-The full run uses `data/raw/SOLETE_Pombo_60min.h5`. The tracked
-`data/raw/SOLETE_short.h5` is only an execution fixture.
+At origin t, input covers [t-PRE,t], targets [t+1,t+60]. PRE counts samples,
+not hours; starting PRE=30 is 2.5 hours. TRAIN/VAL/TEST are chronological
+70/20/10. No label window crosses a boundary. Maximum PRE=120 and full candidate
+validity give common origins across all trials. Missing physical inputs invalidate
+windows; scalers and selectors fit TRAIN only. Timeline remains continuous at night.
 
-## Windows and scaling
+## Physics and targets
 
-At forecast origin `t`, inputs cover `[t-pre, t]` and targets cover
-`[t+1, t+horizon]`. The default configuration uses `pre=24`, `horizon=10`, and a
-chronological 70/20/10 TRAIN/VAL/TEST split. Target windows cannot cross partition
-boundaries. Scalers are fit on TRAIN only and reused for VAL and TEST.
+Pac/Pdc/TempModule/TempCell use config/plant.yaml, which now follows Energy Reports
+Table 1 rather than the different public-example arrays: 200 W x 18 x 2 =7.2 kW
+DC, 10 kW AC. Constant inverter efficiency 0.98 is a documented choice because
+the paper leaves the numeric maximum unspecified. MinutesOfDay=hour*12+minute//5;
+HoursOfDay=hour. Physics selection keeps humidity/POA/Pac/TempCell/HoursOfDay.
+Pearson threshold 0.7 is TRAIN-fitted, with humidity explicitly retained.
 
-## Physics-derived features
+With correct_power=true, finite Pac>0.05 kW replaces measured power when
+abs(measured-Pac)/Pac>0.2; missing power is filled from finite Pac. Target and Pac
+<=0.001 kW become zero. This explicit interpretation differs from public v3.0's
+one-sided 1.5x rule. Raw observations remain in observed_power_raw and in
+prediction CSVs; raw_target_metrics.csv reports the same forecasts against raw
+measurements. This sensitivity is essential because the main corrected target
+depends on the same physics model used to build features. No unpublished outlier
+or detrending settings are invented; raw irradiance is retained.
 
-All models share the EPOA/GHI/Hday reference during single-feature and combination
-screening. Candidate PI arms add `Pac`, `Pdc`, `TempModule`, `TempCell`,
-`physics_residual`, `performance_ratio`, `clear_sky_index`, or `solar_elevation`.
-Their equations use the equipment
-values in [`config/plant.yaml`](../config/plant.yaml). PI and non-PI arms retain the
-same eligible forecast origins so that feature comparisons use the same targets.
+## Daylight and metrics
 
-| New feature | Definition and units |
-| --- | --- |
-| `physics_residual` | Observed `P_Solar[kW] - Pac`, in kW |
-| `performance_ratio` | Observed `P_Solar[kW] / Pac`, dimensionless system-state proxy |
-| `clear_sky_index` | Observed `GHI[kW1m2] / GHI_clear`, dimensionless weather-state proxy |
-| `solar_elevation` | Geometric solar elevation in degrees |
-| `solar_zenith` | `90 - solar_elevation`; supported alternative, excluded from default screening |
+Primary VAL/TEST metrics use geometric solar elevation>0 at each target timestamp,
+computed independently of measured target power using the configured UTC site:
+latitude 55.6867, longitude 12.0985. This is a declared interpretation of the
+paper's night omission; its exact original mask is unavailable. All histories
+and training windows retain night samples. Training MAE and early stopping use
+all finite windows; final selection uses daylight per-horizon VAL RMSE.
+All spaces use identical TEST origins and evaluation masks. MAE/RMSE are kW;
+nRMSE uses explicit 10 kW AC denominator, separate from 7.2 kW DC nameplate.
+Forecasts are raw in primary comparisons; constraints are secondary outputs.
 
-Residual and ratio inputs use only observations in `[t-pre, t]`; future measured
-power never enters X. This performance ratio is an actual/theoretical power ratio,
-not the conventional irradiance-normalized energy performance ratio.
-Ratios are zero when Pac is at or below 0.05 kW or clear-sky GHI is at or below
-0.02 kW/m2. These fixed YAML floors cover night and unstable low denominators;
-missing observations remain missing, and daytime ratios above one are retained.
-
-Solar calculations use the [NOAA fractional-year solar geometry equations](https://gml.noaa.gov/grad/solcalc/solareqns.PDF)
-and the fixed [Haurwitz clear-sky GHI equation](https://pvlib-python.readthedocs.io/en/stable/reference/generated/pvlib.clearsky.haurwitz.html)
-at the timestamps, with verified latitude, longitude and timestamp timezone.
-This simple clear-sky reference models geometry; it does not account for site-specific
-aerosol, turbidity or altitude, so clear-sky index remains an approximate weather proxy.
-Naive timestamps are localized with that timezone; timezone-aware timestamps are
-converted. Ambiguous or nonexistent local times raise an error. Coordinates and
-timezone are supplied in the default YAML as 55.6867 latitude, 12.0985 longitude,
-and UTC for this study. These user-supplied values were checked for irradiance
-alignment on TRAIN. Alternatively, input column names
-can supply elevation (degrees) and clear-sky GHI (kW/m2). These columns must be
-derived independently of held-out outcomes. Solar validity is shared across all arms.
-The fixed replacement removes EPOA/GHI/Hday and inserts Pac/clear-sky index/elevation;
-common measured weather and historical power inputs remain.
-
-The 7.44 kW DC nameplate is used to normalize RMSE. It is not an AC clipping limit.
-Capacity clipping is disabled unless a verified positive `ac_capacity_kw` is supplied.
-Raw and constrained predictions are stored separately; primary comparisons use raw
-predictions.
+Solar geometry follows [NOAA equations](https://gml.noaa.gov/grad/solcalc/solareqns.PDF).
+The supported clear-sky utility uses Haurwitz; residual/performance-ratio and
+clear-sky inputs remain utilities outside the default search. No future weather
+is assumed available. Full choices and reproduction limitations are in
+[research](research.md).
 
 ## Source and license
 

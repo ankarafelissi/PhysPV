@@ -5,9 +5,9 @@ import numpy as np
 import yaml
 
 from .runtime import project_path
-from .data import DERIVED_FEATURES, feature_names, validate_plant
+from .data import DERIVED_FEATURES, CANDIDATE_FEATURES, ORIGINAL_FEATURES, feature_names, validate_plant
 
-CONTRACT_VERSION = 3
+CONTRACT_VERSION = 5
 
 
 def validate_config(config):
@@ -25,8 +25,18 @@ def validate_config(config):
     solar = data.get('solar', {})
     if bool(solar.get('elevation_column')) != bool(solar.get('clear_ghi_column')):
         raise ValueError('Solar input columns must specify both elevation and clear-sky GHI.')
-    if data.get('correct_power') is not False:
-        raise ValueError('data.correct_power must be false; observed targets cannot be replaced.')
+    if type(data.get('correct_power')) is not bool:
+        raise ValueError('data.correct_power must be explicit boolean.')
+    if data['correct_power']:
+        rules = data.get('power_correction', {})
+        for key in ('relative_deviation', 'minimum_pac_kw', 'zero_floor_kw'):
+            value = rules.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not np.isfinite(value) or value <= 0:
+                raise ValueError(f'power_correction.{key} must be finite and positive.')
+    evaluation = data.get('evaluation', {})
+    if evaluation:
+        if type(evaluation.get('daylight_only')) is not bool or evaluation.get('normalization_kw', 0) <= 0:
+            raise ValueError('evaluation requires daylight_only and positive normalization_kw.')
     if data.get('target') != 'P_Solar[kW]':
         raise ValueError('This research phase requires target P_Solar[kW].')
     p_nom = data.get('p_nom_kw')
@@ -61,6 +71,26 @@ def validate_config(config):
     return config
 
 
+def validate_search(config):
+    settings = config['tuning']
+    for key in ('trials_per_space', 'startup_trials'):
+        if type(settings.get(key)) is not int or settings[key] < 1:
+            raise ValueError(f'tuning.{key} must be a positive integer.')
+    if settings['startup_trials'] > settings['trials_per_space']:
+        raise ValueError('Startup trials cannot exceed the per-space budget.')
+    choices = settings.get('pre_choices')
+    if (not isinstance(choices, list) or not choices or len(set(choices)) != len(choices)
+            or any(type(value) is not int or value < 0 for value in choices)):
+        raise ValueError('pre_choices requires distinct nonnegative integers.')
+    if config['data']['pre'] not in choices:
+        raise ValueError('Configured starting PRE must belong to pre_choices.')
+    threshold = config['experiment'].get('pearson_threshold')
+    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not 0 <= threshold <= 1:
+        raise ValueError('pearson_threshold must be in [0, 1].')
+    if config['data']['features'] != [config['data']['target']]:
+        raise ValueError('The joint search keeps only historical target mandatory.')
+
+
 def load_config(path):
     config = yaml.safe_load(project_path(path).read_text(encoding='utf-8'))
     if not isinstance(config, dict):
@@ -76,7 +106,11 @@ def load_config(path):
 def arm_config(config, subset, model, seed):
     """Return a validated configuration for one model and feature subset."""
     result = copy.deepcopy(config)
-    result['data']['candidate_subset'] = list(subset)
+    supported = set(ORIGINAL_FEATURES) | set(CANDIDATE_FEATURES) | {'MinutesOfDay'}
+    if len(subset) != len(set(subset)) or not set(subset).issubset(supported):
+        raise ValueError('subset must contain unique supported features.')
+    result['data']['selected_features'] = [result['data']['target'], *subset]
+    result['data']['candidate_subset'] = [name for name in subset if name in CANDIDATE_FEATURES]
     result['data']['physics'] = bool(set(subset).intersection(DERIVED_FEATURES))
     result.update(model=model, seed=seed)
     return validate_config(result)
@@ -89,6 +123,10 @@ def data_contract(data):
                           **({'candidate_subset': data['candidate_subset']} if 'candidate_subset' in data else {}),
                           'effective_features': feature_names(data),
                           'solar': data.get('solar'), 'ratio_floors': data.get('ratio_floors'),
+                          'origin_pre': data.get('origin_pre'),
+                          'eligibility_features': data.get('eligibility_features'),
+                          'evaluation': data.get('evaluation'),
+                          'power_correction': data.get('power_correction'),
                           'max_rows': data.get('max_rows'), 'version': CONTRACT_VERSION})
 
 
@@ -125,5 +163,6 @@ def smoke_config(config):
         result["models"][model].update(params)
     result["smoke_study"] = True
     if 'tuning' in result:
-        result['tuning'].update(trials_per_model=1, startup_trials=1)
+        result['tuning'].update(trials_per_space=1, startup_trials=1, pre_choices=[0, 2])
+    result['data'].pop('origin_pre', None)
     return validate_config(result)
