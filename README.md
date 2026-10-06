@@ -1,74 +1,80 @@
-# PhysPV: five-minute physics-guided TPE
+# PhysPV
 
-Physics defines a compact feature space; TPE jointly chooses feature subset,
-previous samples (PRE) and model configuration. Compare Original, Expanded-Pearson,
-Expanded-Physics and Intrinsic for XGBoost and CNN_LSTM, with Persistence.
+**Physics guided feature space design for short-term photovoltaic power forecasting.**
 
-The current protocol follows the five-minute, 60-step (five-hour) experiment in
-[Pombo et al., Energy Reports 2022](https://doi.org/10.1016/j.egyr.2022.05.006).
-It replaces grid/coarse-to-fine search with TPE and retains the project's two
-model families. It is a documented adaptation, not an exact numerical reproduction.
+[![Python 3.9](https://img.shields.io/badge/Python-3.9-3776AB)](requirements.txt)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-| Space | Optional inputs |
+PhysPV compares four independently optimized feature spaces for XGBoost and CNN_LSTM on [SOLETE](https://doi.org/10.11583/DTU.17040767), with Persistence as a baseline.
+
+Physics defines the search space, TPE jointly selects features, history length and model parameters. Configurations are selected on TRAIN/VAL and frozen before TEST.
+
+[Background](#background) · [Model choice](#model-choice) · [Experiment design](#experiment-design) · [Results](#results) · [Quick start](#quick-start) · [License](#license)
+
+## Background
+
+PV operators collect weather, SCADA, equipment and power data, but deciding which inputs improve forecasting remains difficult. PhysPV tests whether physical knowledge can guide feature-space design and improve generalization.
+
+## Model choice
+
+- **XGBoost:** efficient nonlinear modeling of tabular inputs, with a practical precedent for boosted trees in [Open Climate Fix's Quartz Solar Forecast](https://github.com/openclimatefix/open-source-quartz-solar-forecast).
+- **CNN_LSTM:** combines short-term fluctuation extraction with temporal memory, motivated by a [2026 two-site PV study](https://doi.org/10.1007/s00521-026-12335-1) evaluating probabilistic forecasts under varied sampling and missing-data conditions.
+
+Together, they test the value of physics derived features across tree and sequence models.
+
+## Experiment design
+
+Adapted from [Pombo et al. (2022)](https://doi.org/10.1016/j.egyr.2022.05.006).
+
+![Experimental framework](assets/figures/experimental_framework.png)
+
+Data quality control: sort timestamps, validate five-minute alignment and reject duplicates; mark missing timestamps on a regular grid and exclude incomplete forecast windows. Missing or inconsistent target-power measurements follow declared physics-based correction rules.
+| Feature space | Optional inputs |
 | --- | --- |
-| Original | Temperature, humidity, wind speed/direction, GHI, POA |
-| Expanded-Pearson | Absolute TRAIN correlation >=0.7; humidity explicitly retained |
-| Expanded-Physics | Humidity, POA, Pac, TempCell, HoursOfDay |
-| Intrinsic | None; historical target power only |
+| Original | Temperature, humidity, wind speed/direction, GHI and POA |
+| Expanded-Pearson | Expanded candidates with absolute TRAIN correlation ≥ 0.70; humidity retained |
+| Expanded-Physics | Humidity, POA, Pac, TempCell and HoursOfDay |
+| Intrinsic | None |
 
-Historical target power is mandatory. Expanded candidates also include Pdc,
-TempModule and MinutesOfDay. PRE ranges from 0 to 120 five-minute samples using
-the union of the reference coarse/fine grids. PRE=30 with all pool features is
-the first trial. Seed 11, 40 attempts per model/space, ten startup attempts:
-320 fits total, fixed before execution. Failures remain recorded and consume budget.
-The objective is mean per-horizon daylight VAL RMSE. All eight winners freeze
-before TEST; no TEST-driven reselection or budget extension.
+Protocol: five-minute data; 60-step forecasts (five hours); chronological 70/20/10 split; `PRE` up to 120 previous samples plus the current sample. Seed 11, 40 attempts per model/space (320 total, including failures), with ten TPE startup attempts per space.
 
-CNN_LSTM searches filters, convolution/pooling sizes, LSTM depth/width, dense
-layers, batch and learning rate; ceiling 1000 epochs with early stopping. XGBoost
-searches depth, learning rate, child weight, regularization and sampling, with
-700-tree ceiling and early stopping. GPU hist is enabled for XGBoost; the local
-TensorFlow environment currently uses CPU. See [the full protocol](docs/research.md)
-for ranges, provenance, unresolved reference details and interpretation limits.
+Scaling and Pearson selection use TRAIN only. Common forecast origins and mean per-horizon daylight VAL RMSE determine frozen winners before one TEST evaluation; no retuning. Nighttime history is retained; geometric night is excluded at VAL/TEST target times.
 
-## Run
+## Results
 
-Use Python 3.9 and `pip install -r requirements.txt`. Put SOLETE_Pombo_5min.h5
-in data/raw/. Local interpreter: C:/Users/felix/anaconda3/envs/pv2024/python.exe.
+Physics reduces XGBoost TEST MAE/RMSE by **6.14%/6.06%** versus Original. CNN_LSTM results are pending. Scores average all 60 daylight horizons against the corrected target; nRMSE uses the 10 kW AC rating.
+
+| Feature space | MAE (kW) | RMSE (kW) | nRMSE |
+| --- | --- | --- | --- |
+| Original | 0.6578 | 1.0151 | 10.15% |
+| Pearson | 0.6673 | 1.0184 | 10.18% |
+| **Physics** | **0.6175** | **0.9536** | **9.54%** |
+| Intrinsic | 0.6570 | 0.9888 | 9.89% |
+
+Pearson/Physics abbreviate Expanded-Pearson/Expanded-Physics. This single-seed XGBoost study used 160 attempts: Original had 30 successful fits, versus 40 in each other space. Results reflect joint configuration selection and physics-dependent target correction.
+
+### Forecast example
+
+![Observed power and frozen XGBoost forecasts](assets/figures/forecast_example.png)
+
+60-minute lead, three TEST days chosen by measured-power variability, independently of forecast errors. Observed is raw measured power. Teal error strips favor Physics; brown favors Original. Original performs better on 1 August.
+
+## Quick start
 
 ```bash
+git clone https://github.com/ankarafelissi/PhysPV.git
+cd PhysPV
+python -m pip install -r requirements.txt
 python -m unittest discover -s tests
-python -m src.experiments --smoke --evaluate-test
-python main.py                     # optimize; TEST closed
-python main.py --optimize --evaluate-test
-python -m src.experiments --resume outputs/results/STUDY_ID/manifest.json --evaluate-test
-python -m src.evaluation --manifest outputs/results/STUDY_ID/manifest.json
+python main.py
 ```
 
-`--feature-study` aliases `--optimize`. Standalone `--model` / `--physics` are
-diagnostics, not optimized comparison arms. Smoke is an execution check only.
+Place `SOLETE_Pombo_5min.h5` in `data/raw/`. Settings: [config/config.yaml](config/config.yaml) and [config/plant.yaml](config/plant.yaml). Add `--evaluate-test` to evaluate after winners freeze. Models, manifests, predictions and figures are saved under `outputs/`.
 
-## Data and outputs
+## Development
 
-Chronological 70/20/10; continuous five-minute histories; common forecast origins
-using maximum PRE; TRAIN-only scalers/Pearson. Primary VAL/TEST scores omit
-geometric night per target timestamp and normalize by 10 kW AC rating. Source HDF5
-measurements are preserved; the available-power target uses explicit 20% Pac
-correction. Predictions also retain raw observed targets and raw-target metrics.
-See [the data contract](docs/data.md). Corrected targets are partly physics-derived;
-results on these targets do not alone prove better measured-power forecasting.
+Coding and testing were assisted by Claude (DeepSeek V4) and Codex (GPT-6). Agent working guidelines are documented in [AGENTS.md](AGENTS.md).
 
-Existing outputs/results/STUDY_ID/ holds the manifest, selector/correlation tables,
-tuning_results.csv, frozen_config.yaml, validation_screening_summary.csv,
-model_comparison.csv, optimized_configurations.csv, physics_comparison.csv, and
-per-attempt logs/history/predictions/metrics. Models and comparison figures live
-under outputs/models/ and outputs/figures/. Resume rejects changed settings/source.
+## License
 
-The previous 96-fit hourly result remains in [research](docs/research.md#legacy-hourly-experiment-4-october-2026)
-as a legacy adaptation. It does not use this protocol. Current results are pending.
-Source/license attribution is retained in [data](docs/data.md).
-
-The five-minute study `20261004_163215_553398_physics_tpe` is running with the
-fixed 320-fit budget. [Current manifest](outputs/results/20261004_163215_553398_physics_tpe/manifest.json).
-It uses 91,951 / 26,265 / 13,103 common TRAIN/VAL/TEST origins. No final TEST
-comparison exists until all eight configurations freeze and evaluation completes.
+Original PhysPV code and documentation: [MIT](LICENSE), © 2026 Felix Lan. SOLETE data: [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Third-party source materials retain their release-specific licenses and attribution.
