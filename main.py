@@ -1,40 +1,32 @@
-"""Project CLI; run python main.py --help for options."""
 import argparse
 from src.runtime import configure_runtime
 
 
 def main():
-    parser = argparse.ArgumentParser(description='PV forecasting with CNN-LSTM and XGBoost')
-    parser.add_argument('--config', default='config/config.yaml', help='YAML configuration path')
-    parser.add_argument('--model', choices=['CNN_LSTM', 'XGBoost', 'all'])
-    parser.add_argument('--physics', choices=['on', 'off'], help='Override the physical-feature switch for both model families')
-    parser.add_argument('--smoke', action='store_true', help='At most 240 rows, PRE=2, H=1, one epoch / five trees')
-    parser.add_argument('--feature-study', '--optimize', dest='feature_study', action='store_true',
-                        help='Run joint TPE across Original/Pearson/Physics/Intrinsic')
-    parser.add_argument('--evaluate-test', action='store_true', help='Evaluate TEST after the feature study selection')
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest='stage')
+    prepare = commands.add_parser('prepare', help='Check data and construct the four feature spaces; no training')
+    prepare.add_argument('--config', default='config/config.yaml', help='YAML configuration path')
+    prepare.add_argument('--smoke', action='store_true', help='Use the small diagnostic config for this entire study')
+    for stage in ('train', 'evaluate', 'report'):
+        command = commands.add_parser(stage, help={
+            'train': 'Search on TRAIN/VAL and freeze all space winners',
+            'evaluate': 'Evaluate frozen winners on TEST once',
+            'report': 'Generate tables and figures from saved predictions',
+        }[stage])
+        command.add_argument('--resume', required=True, help='manifest.json printed by prepare')
     args = parser.parse_args()
-    configure_runtime()
-    from src.config import load_config
-    from src.train import run
-    config = load_config(args.config)
-    if args.feature_study or not (args.model or args.physics or args.smoke):
-        from src.experiments import run as experiment
-        if args.model or args.physics:
-            parser.error('--feature-study controls both models and all feature arms; omit --model/--physics')
-        if args.smoke:
-            parser.error('Use python -m src.experiments --smoke for the workflow diagnostic')
-        experiment(config, evaluate_test=args.evaluate_test)
+    if args.stage is None:
+        parser.print_help()
         return
-    if args.evaluate_test:
-        parser.error('--evaluate-test requires --feature-study')
-    if args.physics is not None:
-        from src.data import CANDIDATE_FEATURES
-        enabled = args.physics == 'on'
-        config['data']['physics'] = enabled
-        config['data']['candidate_subset'] = list(CANDIDATE_FEATURES) if enabled else []
-    names = ['CNN_LSTM', 'XGBoost'] if args.model == 'all' else [args.model or config['model']]
-    for name in names:
-        run(config, name, smoke=args.smoke)
+    configure_runtime()
+    from src.config import load_config, smoke_config
+    from src.experiments import run
+    if args.stage == 'prepare':
+        config = load_config(args.config)
+        run('prepare', config=smoke_config(config) if args.smoke else config)
+    else:
+        run(args.stage, manifest=args.resume)
 
 
 if __name__ == '__main__':

@@ -1,1 +1,1 @@
-"""PV forecasting: shared data pipeline, CNN-LSTM and XGBoost."""
+"""PhysPV: data, models, experiments and evaluation; use main.py for the CLI."""

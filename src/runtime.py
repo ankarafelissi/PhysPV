@@ -5,6 +5,7 @@ import importlib.metadata
 import platform
 import json
 from pathlib import Path
+from time import sleep
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -20,7 +21,14 @@ def write_json(path, value):
     path = Path(path)
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(value, indent=2), encoding='utf-8')
-    temporary.replace(path)
+    for attempt in range(4):
+        try:
+            temporary.replace(path)
+            break
+        except PermissionError:
+            if attempt == 3:
+                raise
+            sleep(0.05)  # Windows scanners may briefly hold a newly written record.
 
 
 def environment_metadata():

@@ -15,41 +15,25 @@ PHYSICAL_INPUTS = ('POA Irr[kW1m2]', 'TEMPERATURE[degC]', 'WIND_SPEED[m1s]')
 CANDIDATE_FEATURES = ('POA Irr[kW1m2]', 'GHI[kW1m2]', *DERIVED_FEATURES, 'HoursOfDay')
 ORIGINAL_FEATURES = ('TEMPERATURE[degC]', 'HUMIDITY[%]', 'WIND_SPEED[m1s]',
                      'WIND_DIR[deg]', 'GHI[kW1m2]', 'POA Irr[kW1m2]')
+SUPPORTED_FEATURES = tuple(dict.fromkeys((*ORIGINAL_FEATURES, *CANDIDATE_FEATURES, 'MinutesOfDay')))
 SPACE_NAMES = ('Original', 'Expanded-Pearson', 'Expanded-Physics', 'Intrinsic')
 EXPANDED_FEATURES = (*ORIGINAL_FEATURES, *PHYSICS_FEATURES, 'MinutesOfDay', 'HoursOfDay')
 PHYSICS_SELECTED = ('HUMIDITY[%]', 'POA Irr[kW1m2]', 'Pac', 'TempCell', 'HoursOfDay')
 
 
 def feature_names(config):
-    """YAML lists common features; the switch controls a fixed appended block."""
-    if type(config.get('physics')) is not bool:
-        raise ValueError('data.physics must be an explicit boolean.')
-    base = config.get('features')
-    if not isinstance(base, list) or not base or any(not isinstance(c, str) for c in base):
+    """Return the explicit input columns in their declared order."""
+    names = config.get('features')
+    if not isinstance(names, list) or not names or any(not isinstance(c, str) or not c for c in names):
         raise ValueError('data.features must be a nonempty list of column names.')
-    if len(base) != len(set(base)):
+    if len(names) != len(set(names)):
         raise ValueError('data.features must not contain duplicates.')
-    if set(base).intersection(RESERVED_PHYSICS):
-        raise ValueError('Do not list physics columns in data.features; use data.physics.')
-    if 'selected_features' in config:
-        selected = config['selected_features']
-        supported = (config['target'], *ORIGINAL_FEATURES, *CANDIDATE_FEATURES, 'MinutesOfDay')
-        if (not isinstance(selected, list) or not selected or len(selected) != len(set(selected))
-                or not set(selected).issubset(supported) or config['target'] not in selected):
-            raise ValueError('selected_features must contain unique supported features and historical target.')
-        if config['physics'] != bool(set(selected).intersection(DERIVED_FEATURES)):
-            raise ValueError('data.physics must match selected derived features.')
-        return list(dict.fromkeys(name for name in supported if name in selected))
-    if 'candidate_subset' in config:
-        subset = config['candidate_subset']
-        if (not isinstance(subset, list) or len(subset) != len(set(subset))
-                or not set(subset).issubset(CANDIDATE_FEATURES)
-                or set(base).intersection(CANDIDATE_FEATURES)):
-            raise ValueError('candidate_subset must contain unique supported candidates, separate from common features.')
-        if config['physics'] != bool(set(subset).intersection(DERIVED_FEATURES)):
-            raise ValueError('data.physics must match the presence of derived physical candidates.')
-        return list(base) + [name for name in CANDIDATE_FEATURES if name in subset]
-    return base + list(PHYSICS_FEATURES) if config['physics'] else list(base)
+    return list(names)
+
+
+def uses_physics(config):
+    """Whether the declared inputs contain a derived physical feature."""
+    return bool(set(feature_names(config)).intersection(DERIVED_FEATURES))
 
 
 def validate_plant(plant):
@@ -203,11 +187,9 @@ def build_features(frame, config):
             'mean_absolute_change_kw': float(np.nanmean(abs(result[config['target']] - measured)))}
     if config.get('evaluation', {}).get('daylight_only'):
         result['evaluation_daylight'] = solar_features(frame, config, geometry_only=True)['solar_elevation'] > 0
-    # Compute eligibility in both arms, but expose no physics columns when off.
+    # Physical-input validity is common even when no physical feature is selected.
     result.attrs['eligible_rows'] = np.isfinite(physical.to_numpy()).all(axis=1)
-    if 'candidate_subset' in config:
-        # Every arm is eligible on the full pool, including an unused GHI sensor.
-        result.attrs['eligible_rows'] &= np.isfinite(result[['GHI[kW1m2]']].to_numpy()).all(axis=1)
+    eligibility = config.get('eligibility_features', [])
     if 'HoursOfDay' in names:
         result['HoursOfDay'] = result.index.hour
     if 'MinutesOfDay' in names:
@@ -225,10 +207,7 @@ def build_features(frame, config):
         derived['physics_residual'] = result[config['target']] - physical['Pac']
         derived['performance_ratio'] = safe_ratio(result[config['target']], physical['Pac'],
                                                   config.get('ratio_floors', {}).get('pac_kw', .05))
-    solar = config.get('solar', {})
-    solar_ready = ((solar.get('site') or {}).get('latitude') is not None
-                   or bool(solar.get('elevation_column') and solar.get('clear_ghi_column')))
-    if set(names).intersection(SOLAR_FEATURES) or ('candidate_subset' in config and solar_ready):
+    if set(names + list(eligibility)).intersection(SOLAR_FEATURES):
         sun = solar_features(frame, config)
         derived = pd.concat([derived, sun], axis=1)
         result.attrs['eligible_rows'] &= np.isfinite(sun.to_numpy()).all(axis=1)
@@ -240,8 +219,8 @@ def build_features(frame, config):
             result[name] = derived[name]
     if set(result.columns).intersection(RESERVED_PHYSICS) != selected_physics:
         raise ValueError('Physics feature invariant violated.')
-    if config.get('eligibility_features'):
-        raw = [name for name in config['eligibility_features'] if name not in DERIVED_FEATURES
+    if eligibility:
+        raw = [name for name in eligibility if name not in DERIVED_FEATURES
                and name not in ('HoursOfDay', 'MinutesOfDay')]
         result.attrs['eligible_rows'] &= np.isfinite(result[raw].to_numpy(float)).all(axis=1)
     return result
@@ -250,25 +229,21 @@ def build_features(frame, config):
 def prepare_spaces(config, directory):
     """Compute selectors before HPO, using only chronological TRAIN rows."""
     data = copy.deepcopy(config['data'])
-    data.update(selected_features=[data['target'], *EXPANDED_FEATURES],
-                candidate_subset=[name for name in EXPANDED_FEATURES if name in CANDIDATE_FEATURES],
-                physics=True)
+    data['features'] = [data['target'], *[name for name in SUPPORTED_FEATURES if name in EXPANDED_FEATURES]]
     frame = build_features(load_data(data), data)
-    pd.DataFrame([{'partition': label, 'rows': right-left,
+    audit = [{'partition': label, 'rows': right-left,
         'changed_rows': int((frame['observed_power_raw'].iloc[left:right] != frame[data['target']].iloc[left:right]).sum()),
         'mean_absolute_change_kw': float(abs(frame['observed_power_raw'].iloc[left:right] - frame[data['target']].iloc[left:right]).mean()),
         'daylight_rows': int(frame['evaluation_daylight'].iloc[left:right].sum()) if 'evaluation_daylight' in frame else right-left}
         for label, left, right in [('TRAIN', 0, int(len(frame)*data['split'][0])),
             ('VAL', int(len(frame)*data['split'][0]), int(len(frame)*sum(data['split'][:2]))),
-            ('TEST', int(len(frame)*sum(data['split'][:2])), len(frame))]]).to_csv(directory / 'preprocessing_audit.csv', index=False)
+            ('TEST', int(len(frame)*sum(data['split'][:2])), len(frame))]]
     end = int(np.floor(len(frame) * data['split'][0] + 1e-9))
     columns = [data['target'], *EXPANDED_FEATURES]
     train = frame.iloc[:end].loc[frame.attrs['eligible_rows'][:end], columns].dropna()
     if len(train) < 2:
         raise ValueError('Insufficient finite TRAIN observations for feature selection.')
     correlation = train.corr()
-    correlation.to_csv(directory / 'train_pearson_correlation.csv')
-    train.corr(method='spearman').to_csv(directory / 'train_spearman_correlation.csv')
     target_correlation = correlation[data['target']]
     pearson = [name for name in EXPANDED_FEATURES
                if abs(target_correlation[name]) >= config['experiment']['pearson_threshold']
@@ -284,14 +259,16 @@ def prepare_spaces(config, directory):
         ('WIND_DIR[deg]', None, 'Not an input to the configured PV performance model'),
         ('MinutesOfDay', 'HoursOfDay', 'Coarser time indicator reduces redundant time-of-day values'),
     ]
-    pd.DataFrame([{'removed': left, 'retained': right, 'reason': reason,
-                   'train_pearson': float(correlation.loc[left, right]) if right else None}
-                  for left, right, reason in reasons]).to_csv(directory / 'physical_redundancy.csv', index=False)
-    pd.DataFrame([{'feature': name, 'train_target_pearson': target_correlation[name],
-                   'pearson_selected': name in pearson, 'physics_selected': name in PHYSICS_SELECTED,
-                   'n_train_rows': len(train)} for name in EXPANDED_FEATURES]).to_csv(
-                       directory / 'feature_space_selection.csv', index=False)
-    return spaces
+    frame.attrs['preprocessing'] = {
+        'audit': audit,
+        'feature_selection': [{'feature': name, 'train_target_pearson': float(target_correlation[name]),
+                               'pearson_selected': name in pearson, 'physics_selected': name in PHYSICS_SELECTED,
+                               'n_train_rows': len(train)} for name in EXPANDED_FEATURES],
+        'physical_redundancy': [{'removed': left, 'retained': right, 'reason': reason,
+                                'train_pearson': float(correlation.loc[left, right]) if right else None}
+                               for left, right, reason in reasons],
+    }
+    return spaces, frame
 
 
 def input_identity(config):
@@ -341,7 +318,7 @@ def make_scaler(name):
     raise ValueError('scaler must be MinMax01, MinMax11 or Standard.')
 
 
-def prepare_data(frame, config, scalers=None):
+def prepare_data(frame, config, scalers=None, partitions=('TRAIN', 'VAL', 'TEST')):
     """Split by target timestamps; validation/test may use earlier observed context.
 
     Each input contains t-PRE through t; labels contain t+1 through t+H.
@@ -356,8 +333,6 @@ def prepare_data(frame, config, scalers=None):
     features, target = feature_names(config), config['target']
     if not isinstance(target, str):
         raise ValueError('This pipeline supports one target and multiple forecast steps.')
-    if not features or len(features) != len(set(features)):
-        raise ValueError('features must be nonempty and unique.')
     missing = set(features + [target]) - set(frame.columns)
     if missing:
         raise ValueError('Missing columns: ' + ', '.join(sorted(missing)))
@@ -374,6 +349,8 @@ def prepare_data(frame, config, scalers=None):
         raise ValueError('Feature eligibility mask does not match the time axis.')
     splits = {}
     for name, start, end in [('TRAIN', 0, cut1), ('VAL', cut1, cut2), ('TEST', cut2, n)]:
+        if name not in partitions:
+            continue
         origins = np.arange(max(origin_pre, start - 1), end - horizon)
         origins = np.asarray([t for t in origins
                               if np.isfinite(values[t-pre:t+1]).all()
@@ -393,12 +370,6 @@ def prepare_data(frame, config, scalers=None):
             'Y_raw': np.stack([frame['observed_power_raw'].to_numpy(float)[t+1:t+horizon+1]
                 for t in origins]) if 'observed_power_raw' in frame else np.stack([labels[t+1:t+horizon+1] for t in origins]),
         }
-        if 'POA Irr[kW1m2]' in frame:
-            poa = frame['POA Irr[kW1m2]'].to_numpy(dtype=float)
-            splits[name]['sky_variability'] = np.array([np.std(poa[t-pre:t+1]) for t in origins])
-            splits[name]['power_level'] = np.array([np.mean(labels[t-pre:t+1]) for t in origins])
-            # Used only for post-hoc stratification, never included in X.
-            splits[name]['ramp_magnitude'] = np.abs(splits[name]['Y'] - labels[origins, None])
     if scalers is None:
         scalers = {'X': make_scaler(config['scaler']), 'Y': make_scaler(config['scaler'])}
         scalers['X'].fit(splits['TRAIN']['X'].reshape(-1, len(features)))

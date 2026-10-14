@@ -8,7 +8,6 @@ tuning:
 
 data:
   path: data/raw/SOLETE_Pombo_5min.h5
-  processed_path: data/processed/solete_5min_features.h5
   resolution: 5min
   target: P_Solar[kW]
   features: ["P_Solar[kW]"]
@@ -25,8 +24,6 @@ data:
   evaluation:
     daylight_only: true
     normalization_kw: 10.0
-  physics: false
-  candidate_subset: []
   ratio_floors:
     pac_kw: 0.05
     clear_ghi_kw_m2: 0.02

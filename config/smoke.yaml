@@ -1,4 +1,4 @@
-# Shared execution-only overrides for individual and study smoke runs.
+# Execution-only overrides applied by `main.py prepare --smoke`.
 data:
   max_rows: 240
   pre: 2

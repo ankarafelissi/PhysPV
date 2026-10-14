@@ -5,9 +5,53 @@ import numpy as np
 import yaml
 
 from .runtime import project_path
-from .data import DERIVED_FEATURES, CANDIDATE_FEATURES, ORIGINAL_FEATURES, feature_names, validate_plant
+from .data import (DERIVED_FEATURES, PHYSICS_FEATURES, RESERVED_PHYSICS, SOLAR_FEATURES,
+                   CANDIDATE_FEATURES, SUPPORTED_FEATURES, feature_names, validate_plant)
 
-CONTRACT_VERSION = 5
+CONTRACT_VERSION = 6
+LEGACY_FEATURE_KEYS = {'physics', 'candidate_subset', 'selected_features'}
+
+
+def upgrade_legacy_features(data):
+    """Convert old YAML feature controls once, preserving ordering and eligibility."""
+    if not LEGACY_FEATURE_KEYS.intersection(data):
+        return
+    base = feature_names(data)
+    physics = data.get('physics')
+    if type(physics) is not bool:
+        raise ValueError('Legacy data.physics must be an explicit boolean.')
+    if set(base).intersection(RESERVED_PHYSICS):
+        raise ValueError('Legacy data.features cannot contain physics columns.')
+    if 'selected_features' in data:
+        selected = feature_names({'features': data['selected_features']})
+        supported = (data['target'], *SUPPORTED_FEATURES)
+        if not set(selected).issubset(supported) or data['target'] not in selected:
+            raise ValueError('Legacy selected_features requires supported features and historical target.')
+        names = list(dict.fromkeys(name for name in supported if name in selected))
+        if physics != bool(set(names).intersection(DERIVED_FEATURES)):
+            raise ValueError('Legacy data.physics does not match selected_features.')
+    elif 'candidate_subset' in data:
+        subset = data['candidate_subset']
+        if (not isinstance(subset, list) or any(not isinstance(name, str) for name in subset)
+                or len(subset) != len(set(subset)) or not set(subset).issubset(CANDIDATE_FEATURES)
+                or set(base).intersection(CANDIDATE_FEATURES)):
+            raise ValueError('Legacy candidate_subset requires unique supported candidates separate from features.')
+        if physics != bool(set(subset).intersection(DERIVED_FEATURES)):
+            raise ValueError('Legacy data.physics does not match candidate_subset.')
+        names = base + [name for name in CANDIDATE_FEATURES if name in subset]
+    else:
+        names = base + list(PHYSICS_FEATURES) if physics else base
+    if 'candidate_subset' in data:
+        # The old subset interface screened the whole GHI/solar pool in every arm.
+        common = ['GHI[kW1m2]']
+        solar = data.get('solar', {})
+        if ((solar.get('site') or {}).get('latitude') is not None
+                or bool(solar.get('elevation_column') and solar.get('clear_ghi_column'))):
+            common.extend(SOLAR_FEATURES)
+        data['eligibility_features'] = list(dict.fromkeys([*data.get('eligibility_features', []), *common]))
+    data['features'] = names
+    for key in LEGACY_FEATURE_KEYS:
+        data.pop(key, None)
 
 
 def validate_config(config):
@@ -15,6 +59,8 @@ def validate_config(config):
         if key not in config:
             raise ValueError(f'Missing config section: {key}')
     data = config['data']
+    if LEGACY_FEATURE_KEYS.intersection(data):
+        raise ValueError('Use explicit data.features; load legacy YAML through load_config.')
     feature_names(data)
     floors = data.get('ratio_floors', {})
     for key in ('pac_kw', 'clear_ghi_kw_m2'):
@@ -96,6 +142,7 @@ def load_config(path):
     if not isinstance(config, dict):
         raise ValueError('Config must be a YAML mapping.')
     data = config.get('data', {})
+    upgrade_legacy_features(data)
     if 'plant' not in data:
         if 'plant_path' not in data:
             raise ValueError('data.plant_path or embedded data.plant is required.')
@@ -106,32 +153,23 @@ def load_config(path):
 def arm_config(config, subset, model, seed):
     """Return a validated configuration for one model and feature subset."""
     result = copy.deepcopy(config)
-    supported = set(ORIGINAL_FEATURES) | set(CANDIDATE_FEATURES) | {'MinutesOfDay'}
-    if len(subset) != len(set(subset)) or not set(subset).issubset(supported):
+    if len(subset) != len(set(subset)) or not set(subset).issubset(SUPPORTED_FEATURES):
         raise ValueError('subset must contain unique supported features.')
-    result['data']['selected_features'] = [result['data']['target'], *subset]
-    result['data']['candidate_subset'] = [name for name in subset if name in CANDIDATE_FEATURES]
-    result['data']['physics'] = bool(set(subset).intersection(DERIVED_FEATURES))
+    result['data']['features'] = [result['data']['target'], *[name for name in SUPPORTED_FEATURES if name in subset]]
     result.update(model=model, seed=seed)
     return validate_config(result)
 
 
 def data_contract(data):
     keys = ('features', 'target', 'pre', 'horizon', 'resolution', 'scaler',
-            'correct_power', 'split', 'physics', 'p_nom_kw', 'plant', 'constraints')
+            'correct_power', 'split', 'p_nom_kw', 'plant', 'constraints')
     return copy.deepcopy({**{key: data[key] for key in keys},
-                          **({'candidate_subset': data['candidate_subset']} if 'candidate_subset' in data else {}),
-                          'effective_features': feature_names(data),
                           'solar': data.get('solar'), 'ratio_floors': data.get('ratio_floors'),
                           'origin_pre': data.get('origin_pre'),
                           'eligibility_features': data.get('eligibility_features'),
                           'evaluation': data.get('evaluation'),
                           'power_correction': data.get('power_correction'),
                           'max_rows': data.get('max_rows'), 'version': CONTRACT_VERSION})
-
-
-def arm_name(model, physics):
-    return ('PI-' if physics else '') + model
 
 
 def output_paths(config, run_id=None, study_dir=None):
