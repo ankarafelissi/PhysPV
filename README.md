@@ -9,19 +9,6 @@ PhysPV compares four independently optimized feature spaces for XGBoost and CNN_
 
 Physics defines the search space, TPE jointly selects features, history length and model parameters. Configurations are selected on TRAIN/VAL and frozen before TEST.
 
-[Background](#background) · [Model choice](#model-choice) · [Experiment design](#experiment-design) · [Results](#results) · [Quick start](#quick-start) · [License](#license)
-
-## Background
-
-PV operators collect weather, SCADA, equipment and power data, but deciding which inputs improve forecasting remains difficult. PhysPV tests whether physical knowledge can guide feature-space design and improve generalization.
-
-## Model choice
-
-- **XGBoost:** efficient nonlinear modeling of tabular inputs, with a practical precedent for boosted trees in [Open Climate Fix's Quartz Solar Forecast](https://github.com/openclimatefix/open-source-quartz-solar-forecast).
-- **CNN_LSTM:** combines short-term fluctuation extraction with temporal memory, motivated by a [2026 two-site PV study](https://doi.org/10.1007/s00521-026-12335-1) evaluating probabilistic forecasts under varied sampling and missing-data conditions.
-
-Together, they test the value of physics derived features across tree and sequence models.
-
 ## Experiment design
 
 Adapted from [Pombo et al. (2022)](https://doi.org/10.1016/j.egyr.2022.05.006).
@@ -57,19 +44,34 @@ Pearson/Physics abbreviate Expanded-Pearson/Expanded-Physics. This single-seed X
 
 ![Observed power and frozen XGBoost forecasts](assets/figures/forecast_example.png)
 
-60-minute lead, three TEST days chosen by measured-power variability, independently of forecast errors. Observed is raw measured power. Teal error strips favor Physics; brown favors Original. Original performs better on 1 August.
+60-minute lead, three TEST days chosen by measured-power variability, independently of forecast errors. Observed is raw measured power. Teal error strips favor Physics; brown favors Original.
 
 ## Quick start
 
+Use Python 3.9 and place `SOLETE_Pombo_5min.h5` in `data/raw/`. Settings: [config/config.yaml](config/config.yaml) and [config/plant.yaml](config/plant.yaml).
+
+Run each stage separately. Replace `<study_id>` with the ID printed by `prepare` and use the same manifest throughout.
+
 ```bash
-git clone https://github.com/ankarafelissi/PhysPV.git
-cd PhysPV
 python -m pip install -r requirements.txt
-python -m unittest discover -s tests
-python main.py
+python main.py prepare
+python main.py train --resume "outputs/results/<study_id>/manifest.json"
+python main.py evaluate --resume "outputs/results/<study_id>/manifest.json"
+python main.py report --resume "outputs/results/<study_id>/manifest.json"
 ```
 
-Place `SOLETE_Pombo_5min.h5` in `data/raw/`. Settings: [config/config.yaml](config/config.yaml) and [config/plant.yaml](config/plant.yaml). Add `--evaluate-test` to evaluate after winners freeze. Models, manifests, predictions and figures are saved under `outputs/`.
+`prepare` checks data; `train` searches and freezes winners; `evaluate` scores TEST; `report` draws the figures. Use `prepare --smoke` for a small diagnostic study.
+## Tests
+
+```bash
+python -m unittest discover -s tests
+```
+
+Tests use synthetic data and mocked training; no real dataset or training experiment is required.
+
+- [test_data.py](tests/test_data.py): feature configuration, timestamps/gaps, common origins, TRAIN-only selection/scaling and raw-preserving target correction.
+- [test_models.py](tests/test_models.py): daylight metrics, forecast health, bootstrap, solar geometry and model save/load.
+- [test_workflow.py](tests/test_workflow.py): stage order, fixed budgets, frozen TEST evaluation, recovery and safe output cleanup.
 
 ## Development
 
