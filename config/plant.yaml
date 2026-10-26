@@ -1,0 +1,16 @@
+# Energy Reports 2022, Table 1. Public v3.0 example uses different arrays.
+reference_irradiance_w_m2: 1000.0
+reference_temperature_c: 25.0
+ac_capacity_kw: 10.0
+# Paper specifies maximum efficiency, but not its numeric value; predeclare 0.98
+# from the public SMA reference curve. This is a documented reproduction choice.
+efficiency_input_w: [0, 10000]
+efficiency_fraction: [0.98, 0.98]
+arrays:
+  - module_power_w: 200.0
+    modules_series: 18
+    strings_parallel: 2
+    temperature_coefficient_per_c: -0.00478
+    module_a: -3.56
+    module_b: -0.075
+    cell_delta_c: 3.0
