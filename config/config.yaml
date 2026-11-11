@@ -28,7 +28,6 @@ data:
     pac_kw: 0.05
     clear_ghi_kw_m2: 0.02
   solar:
-    # SOLETE / SYSLAB, DTU Ris酶, Roskilde, Denmark
     site:
       latitude: 55.6867
       longitude: 12.0985
