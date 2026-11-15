@@ -1,15 +1,17 @@
-"""Stepwise study: prepare data, optimize on VAL, evaluate frozen models, report."""
+"""Stepwise study: prepare data, optimize on VAL, evaluate frozen models."""
 
 import copy
 import json
 import logging
 import math
+import os
 import shutil
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
+import numpy as np
 import joblib
 import pandas as pd
 import yaml
@@ -21,6 +23,7 @@ from .config import (
     validate_config,
     validate_search,
     validate_study,
+    validate_runtime,
 )
 from .data import (
     EXPANDED_FEATURES,
@@ -36,12 +39,17 @@ from .evaluate import (
     export_results,
     forecast_health,
     require_healthy_forecasts,
-    report,
 )
-from .models import load_model, predict_scaled, save_model, train_model
-from .runtime import configure_runtime, environment_metadata, project_path, write_json
+from .models import (
+    check_gpu, configure_gpu, load_model, predict_scaled, save_model, train_model,
+    verify_gpu_model,
+)
+from .runtime import (
+    GPUError, configure_runtime, environment_metadata, is_gpu_failure, project_path,
+    synchronize_gpu, write_csv, write_json,
+)
 
-WORKFLOW_VERSION = 6
+WORKFLOW_VERSION = 8
 
 
 class StudyChangedError(RuntimeError):
@@ -99,13 +107,15 @@ def _attempt(state, manifest, model, space, kind, config):
         'arm': space,
         'seed': config['seed'],
         'status': 'started',
+        'started_at': datetime.now().astimezone().isoformat(),
         'effective_config': config,
         'command': subprocess.list2cmdline([sys.executable, *sys.argv]),
         'commit': state['source']['commit'],
         'dirty': state['source']['dirty'],
-        'log': str(manifest.parent / 'runs' / run_id / 'train.log')
-        if kind == 'tuning'
-        else None,
+        'log': (str(manifest.parent / 'runs' / run_id / 'train.log')
+                if kind == 'tuning' else
+                str(manifest.parent / 'runs' / (run_id + '.log'))
+                if kind == 'search' else None),
     }
     state['attempts'].append(attempt)
     if kind == 'tuning':
@@ -129,6 +139,8 @@ def _prune_models(state, manifest):
             )
             keep.add(best['result']['training_run_id'])
     for attempt in state.get('attempts', []):
+        if attempt.get('inherited_from_study'):
+            continue  # Predecessor artifacts remain immutable in a continuation.
         if attempt['run_type'] != 'tuning' or attempt.get('artifact_retained') is False:
             continue
         if attempt['run_id'] in keep or attempt['status'] == 'started':
@@ -177,17 +189,18 @@ def train(config, space, run_id, directory, frame, expected_partitions):
         )
         if checkpoint:
             checkpoint.parent.mkdir()
-        started = perf_counter()
         logger.info(
             'Features=%s; PRE=%s; parameters=%s',
             config['data']['features'],
             config['data']['pre'],
             config['models'][name],
         )
-        model, _ = train_model(
-            name, config['models'][name], splits, config['seed'], checkpoint, logger
+        model, history = train_model(
+            name, config['models'][name], splits, config['seed'], checkpoint, logger,
+            gpu_id=config['runtime']['gpu_id'],
         )
-        training_seconds = perf_counter() - started
+        training_seconds = history.get('fit_time_s')
+        print(f'{name} fit finished; scoring VAL and saving artifacts...', flush=True)
         scaled = predict_scaled(model, name, splits['VAL']['X'])
         predicted = (
             scalers['Y'].inverse_transform(scaled.reshape(-1, 1)).reshape(scaled.shape)
@@ -220,6 +233,11 @@ def train(config, space, run_id, directory, frame, expected_partitions):
             'validation_rmse': float(scores['RMSE'].mean()),
             'power_correction': frame.attrs.get('power_correction'),
             'training_seconds': training_seconds,
+            'complexity': {key: history[key] for key in (
+                'epochs_completed', 'best_epoch', 'checkpoint_monitor',
+                'best_iteration', 'actual_boosting_rounds', 'n_estimators'
+            ) if key in history},
+            'input_shape': list(splits['TRAIN']['X'].shape[1:]),
             'samples': sizes,
             'smoke': bool(config.get('smoke_study')),
         }
@@ -236,8 +254,11 @@ def train(config, space, run_id, directory, frame, expected_partitions):
             'validation_mae': metadata['validation_mae'],
             'validation_rmse': metadata['validation_rmse'],
             'training_seconds': training_seconds,
+            'complexity': metadata['complexity'],
+            'input_shape': metadata['input_shape'],
         }
-    except (Exception, KeyboardInterrupt):
+    except (Exception, KeyboardInterrupt) as error:
+        error.training_seconds = locals().get('training_seconds')
         logger.exception('Training failed or interrupted')
         raise
     finally:
@@ -252,8 +273,13 @@ def train(config, space, run_id, directory, frame, expected_partitions):
 def _fit_trial(candidate, arm, model, state, manifest, frame):
     """Track one fit attempt and persist completion, failure or interruption."""
     validate_source(state['source'])
+    if input_identity(state['config']['data']) != state['input']:
+        raise StudyChangedError('Input changed during search.')
     config = arm_config(candidate, arm['subset'], model, candidate['seed'])
     attempt = _attempt(state, manifest, model, arm['id'], 'tuning', config)
+    trial = state['tuning'][model + '/' + arm['id']]['trials'][-1]
+    trial['training_run_id'] = attempt['run_id']
+    write_json(manifest, state)
     try:
         result = train(
             config,
@@ -266,6 +292,8 @@ def _fit_trial(candidate, arm, model, state, manifest, frame):
         if not math.isfinite(result['validation_rmse']):
             raise ValueError('Non-finite validation RMSE.')
         validate_source(state['source'])
+        if input_identity(state['config']['data']) != state['input']:
+            raise StudyChangedError('Input changed during search.')
         attempt.update(status='completed', artifact=result['artifact'])
     except (Exception, KeyboardInterrupt) as error:
         attempt.update(
@@ -339,12 +367,14 @@ def predict(config, artifact, run_id, directory, frame):
     return metadata_path
 
 
-def _create_study(config):
-    """Create the frozen study configuration and its initial manifest state."""
-    config = copy.deepcopy(validate_config(config))
-    validate_search(config)
-    validate_study(config['study'])
-    requested = copy.deepcopy(config)
+def _effective_config(requested, model=None):
+    """Apply only predeclared study controls and the one permitted CLI model choice."""
+    config = copy.deepcopy(requested)
+    if model is not None:
+        config['model'] = model
+    config['models']['XGBoost'].update(
+        gpu_id=config['runtime']['gpu_id'], predictor='gpu_predictor'
+    )
     config['data']['origin_pre'] = max(config['tuning']['pre_choices'])
     config['data']['eligibility_features'] = list(
         dict.fromkeys(
@@ -355,6 +385,16 @@ def _create_study(config):
             ]
         )
     )
+    return config
+
+
+def _create_study(config):
+    """Create the frozen study configuration and its initial manifest state."""
+    requested = copy.deepcopy(validate_config(config))
+    validate_search(requested)
+    validate_runtime(requested['runtime'])
+    validate_study(requested['study'])
+    config = _effective_config(requested)
     study_id = datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '_physics_tpe'
     directory = project_path(config['output_dir']) / 'results' / study_id
     directory.mkdir(parents=True)
@@ -373,12 +413,44 @@ def _create_study(config):
         'feature_spaces': None,
         'screening': [],
         'selected': None,
+        'selected_model': None,
+        'tuning_completed': False,
+        'evaluation_completed': False,
         'final': [],
     }
     return manifest, state
 
 
-def _resume_study(manifest, config):
+def _recover_progress(state):
+    """Recover only durable lower bounds from worker heartbeat logs after a hard exit."""
+    for attempt in state['attempts']:
+        if (attempt['status'] == 'completed' or attempt.get('wall_time_complete')
+                or not attempt.get('log')):
+            continue
+        path = Path(attempt['log'])
+        if not path.exists():
+            continue
+        with path.open('rb') as stream:
+            stream.seek(max(0, path.stat().st_size - 65536))
+            lines = stream.read().decode('utf-8', errors='replace').splitlines()
+        for line in lines:
+            if not line.startswith('PhysPV progress '):
+                continue
+            try:
+                progress = json.loads(line[len('PhysPV progress '):])
+            except ValueError:
+                continue
+            if progress['run_id'] != attempt['run_id']:
+                continue
+            attempt.update(wall_time_s=progress['wall_time_s'], wall_time_complete=False)
+            if progress.get('trial_key'):
+                record = state['tuning'][progress['trial_key']]
+                trial = record['trials'][progress['trial_number']]
+                if trial['status'] == 'started':
+                    trial['trial_wall_time_s'] = progress['trial_wall_time_s']
+
+
+def _resume_study(manifest, config, recover=True):
     """Validate saved inputs and mark unfinished attempts as interrupted."""
     if manifest is None or config is not None:
         raise ValueError(
@@ -393,28 +465,62 @@ def _resume_study(manifest, config):
         )
     validate_source(state['source'])
     config = state['config']
-    if state['environment'] != environment_metadata() or state[
-        'input'
-    ] != input_identity(config['data']):
-        raise StudyChangedError('Runtime or input changed; prepare a new study.')
+    if config != _effective_config(state['requested_config'], state.get('selected_model')):
+        raise StudyChangedError('Effective configuration changed; prepare a new study.')
+    current_environment = environment_metadata()
+    if state['environment'] != current_environment:
+        differences = {
+            key: {'saved': state['environment'].get(key),
+                  'current': current_environment.get(key)}
+            for key in state['environment'].keys() | current_environment.keys()
+            if state['environment'].get(key) != current_environment.get(key)
+        }
+        raise StudyChangedError('Runtime changed; prepare a new study. Differences: '
+                                + json.dumps(differences, ensure_ascii=False))
+    if state['input'] != input_identity(config['data']):
+        raise StudyChangedError('Input file changed; prepare a new study.')
     if state['processed_input'] != input_identity(
         {'path': directory / 'features.joblib'}
     ):
         raise StudyChangedError('Prepared features changed; prepare a new study.')
-    for attempt in state['attempts']:
+    if recover:
+        _require_stopped_workers(state)
+        _recover_progress(state)
+    for attempt in state['attempts'] if recover else []:
         if attempt['status'] == 'started':
             attempt.update(
                 status='interrupted', error='Previous process ended before completion.'
             )
-    for record in state.get('tuning', {}).values():
+    for record in state.get('tuning', {}).values() if recover else []:
         for trial in record['trials']:
             if trial['status'] == 'started':
                 trial.update(
                     status='interrupted',
                     error='Previous process ended before completion.',
+                    wall_time_complete=False,
                 )
-    _prune_models(state, manifest)
+                trial.setdefault('trial_wall_time_s', 0.0)
+    if recover:
+        _prune_models(state, manifest)
+        if state.get('tuning'):
+            export_search(state, manifest)
     return manifest, state
+
+
+def _require_stopped_workers(state):
+    """Avoid resuming beside a child left running after its coordinator exited."""
+    import psutil
+
+    for attempt in state['attempts']:
+        if attempt['status'] != 'started' or not attempt.get('worker_pid'):
+            continue
+        try:
+            process = psutil.Process(attempt['worker_pid'])
+            if (process.is_running() and
+                    process.create_time() == attempt['worker_created_at']):
+                raise RuntimeError(f'Study worker {process.pid} is still running; wait for it to exit before resuming.')
+        except psutil.NoSuchProcess:
+            pass
 
 
 def _prepare_study(config, state, directory):
@@ -439,18 +545,149 @@ def _prepare_study(config, state, directory):
 
 
 def _train_study(config, state, manifest):
-    """Search TRAIN/VAL once and freeze every space winner."""
-    directory = manifest.parent
+    """Run bounded TRAIN/VAL search and freeze each space winner."""
     if state['partitions'] is None:
         raise ValueError('Prepare data before training.')
     if not state.get('parameters_frozen'):
-        state['status'] = 'started'
+        _launch_worker('tuning', state, manifest)
+
+
+def select_model(state, manifest, model):
+    """Bind the CLI choice once; the YAML default never chooses a study model."""
+    saved = state.get('selected_model')
+    if saved is not None and model not in (None, saved):
+        raise ValueError(f'This study is bound to {saved}; prepare a new study for {model}.')
+    selected = saved if model is None else model
+    if selected not in ('XGBoost', 'CNN_LSTM'):
+        raise ValueError('First train requires --model XGBoost or --model CNN_LSTM.')
+    state['selected_model'] = selected
+    state['config']['model'] = selected
+    write_json(manifest, state)
+
+
+def _launch_worker(kind, state, manifest):
+    """Wait for a worker to exit before launching another GPU process."""
+    model = state['selected_model']
+    attempt = _attempt(state, manifest, model, 'all', 'search', state['config'])
+    log = Path(attempt['log'])
+    log.parent.mkdir(parents=True, exist_ok=True)
+    bootstrap = ('from src.runtime import configure_runtime; configure_runtime(); '
+                 'import runpy; runpy.run_module("src.experiments", run_name="__main__")')
+    command = [sys.executable, '-u', '-X', 'utf8', '-c', bootstrap, '--worker', kind,
+               '--resume', str(manifest), '--run-id', attempt['run_id']]
+    attempt['worker_command'] = subprocess.list2cmdline(command)
+    worker_environment = os.environ.copy()
+    saved_environment = state.get('environment') or environment_metadata()
+    for key, field in {
+        'CUDA_VISIBLE_DEVICES': 'cuda_visible_devices',
+        'OMP_NUM_THREADS': 'omp_num_threads',
+        'TF_NUM_INTRAOP_THREADS': 'tensorflow_intraop_threads',
+        'TF_NUM_INTEROP_THREADS': 'tensorflow_interop_threads',
+        'TF_DETERMINISTIC_OPS': 'tensorflow_deterministic_ops',
+    }.items():
+        value = saved_environment.get(field)
+        if value is None:
+            worker_environment.pop(key, None)
+        else:
+            worker_environment[key] = value
+    write_json(manifest, state)
+    process = None
+    failure = None
+    try:
+        with log.open('a', encoding='utf-8') as output:
+            process = subprocess.Popen(
+                command, cwd=project_path('.'), stdout=output, stderr=subprocess.STDOUT,
+                env=worker_environment,
+            )
+            started = perf_counter()
+            heartbeat = started
+            with log.open('r', encoding='utf-8', errors='replace') as live:
+                while True:
+                    finished = False
+                    try:
+                        process.wait(timeout=0.25)
+                        finished = True
+                    except subprocess.TimeoutExpired:
+                        pass
+                    for line in live.readlines():
+                        if not line.startswith('PhysPV progress '):
+                            print(line, end='', flush=True)
+                    if finished:
+                        break
+                    if perf_counter() - heartbeat < 5:
+                        continue
+                    heartbeat = perf_counter()
+                    current = json.loads(manifest.read_text(encoding='utf-8'))
+                    progress = {'run_id': attempt['run_id'],
+                                'wall_time_s': perf_counter() - started}
+                    for key, record in current.get('tuning', {}).items():
+                        for trial in record['trials']:
+                            if trial['status'] == 'started':
+                                progress.update(
+                                    trial_key=key, trial_number=trial['number'],
+                                    trial_wall_time_s=max(0, (
+                                        datetime.now().astimezone()
+                                        - datetime.fromisoformat(trial['started_at'])
+                                    ).total_seconds()),
+                                )
+                    output.write('PhysPV progress ' + json.dumps(progress) + '\n')
+                    output.flush()
+    except (Exception, KeyboardInterrupt) as error:
+        failure = error
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait()
+    finally:
+        latest = json.loads(manifest.read_text(encoding='utf-8'))
+        state.clear()
+        state.update(latest)
+    saved = next(row for row in state['attempts'] if row['run_id'] == attempt['run_id'])
+    if failure is not None or process is None or process.returncode != 0 or saved['status'] != 'completed':
+        if saved['status'] == 'started':
+            saved.update(status='interrupted' if isinstance(failure, KeyboardInterrupt)
+                         else 'failed', error=str(failure) if failure else
+                         f'Worker exited with code {process.returncode if process else "not started"}.')
         write_json(manifest, state)
-        tune(config, state, manifest, joblib.load(directory / 'features.joblib'))
-        state.update(
-            status='selection_frozen',
-            selection_criterion='mean per-horizon validation RMSE in kW',
-        )
+        if failure is not None:
+            raise failure
+        raise GPUError(f'{kind} worker failed: {saved.get("error")}; log: {log}')
+
+
+def _worker(kind, manifest, run_id):
+    """Internal worker entry point; never invoked automatically by tests."""
+    configure_runtime()
+    manifest, state = _resume_study(manifest, None, recover=False)
+    attempt = next(row for row in state['attempts'] if row['run_id'] == run_id)
+    started = perf_counter()
+    attempt['started_at'] = datetime.now().astimezone().isoformat()
+    import psutil
+
+    attempt.update(worker_pid=os.getpid(), worker_created_at=psutil.Process().create_time())
+    write_json(manifest, state)
+    try:
+        if kind == 'tuning':
+            name = state['selected_model']
+            device = check_gpu(name, state['config']['models'][name],
+                               state['config']['runtime']['gpu_id'])
+            if state.get('gpu') is not None and state['gpu'] != device:
+                raise StudyChangedError('GPU device or driver changed since the previous search attempt.')
+            state['gpu'] = device
+            state['search_started_at'] = state.get('search_started_at', attempt['started_at'])
+            write_json(manifest, state)
+            tune(state['config'], state, manifest,
+                 joblib.load(manifest.with_name('features.joblib')))
+
+        validate_source(state['source'])
+        attempt['status'] = 'completed'
+    except (Exception, KeyboardInterrupt) as error:
+        attempt.update(status='interrupted' if isinstance(error, KeyboardInterrupt)
+                       else 'failed', error=str(error))
+        raise
+    finally:
+        attempt.update(wall_time_s=perf_counter() - started,
+                       wall_time_complete=True,
+                       finished_at=datetime.now().astimezone().isoformat())
+        write_json(manifest, state)
 
 
 def _evaluate_study(state, manifest):
@@ -484,22 +721,12 @@ def _evaluate_study(state, manifest):
             raise
         state['final'].append({**record, 'prediction_metadata': str(metadata)})
         write_json(manifest, state)
-    if state['status'] != 'completed':
-        state['status'] = 'evaluated'
+    state['status'] = 'completed'
+    state['evaluation_completed'] = True
     consolidate_results(directory, state)
 
 
-def _report_study(state, directory):
-    """Require all TEST results before exporting the saved-result report."""
-    if not state.get('parameters_frozen') or len(state['final']) != 2 * len(
-        SPACE_NAMES
-    ):
-        raise ValueError('Evaluate all frozen models before generating the report.')
-    report(directory, state)
-    state['status'] = 'completed'
-
-
-def run(stage, config=None, manifest=None):
+def run(stage, config=None, manifest=None, model=None):
     """Execute one stage and return the path to its shared manifest.
 
     Supply config only for prepare. Later stages use the saved configuration
@@ -507,13 +734,15 @@ def run(stage, config=None, manifest=None):
     before being raised to the caller.
     """
     configure_runtime()
-    if stage not in ('prepare', 'train', 'evaluate', 'report'):
+    if stage not in ('prepare', 'train', 'evaluate'):
         raise ValueError(f'Unknown stage: {stage}')
     if stage == 'prepare':
         manifest, state = _create_study(config)
     else:
         manifest, state = _resume_study(manifest, config)
     config = state['config']
+    if stage == 'train':
+        select_model(state, manifest, model)
     directory = manifest.parent
     state['stage'] = stage
     write_json(manifest, state)
@@ -524,8 +753,6 @@ def run(stage, config=None, manifest=None):
             _train_study(config, state, manifest)
         elif stage == 'evaluate':
             _evaluate_study(state, manifest)
-        else:
-            _report_study(state, directory)
         validate_source(state['source'])
         write_json(manifest, state)
         print(f'{stage} finished ({state["status"]}): {manifest}', flush=True)
@@ -610,6 +837,10 @@ def export_search(state, manifest):
                     'validation_rmse': trial.get('validation_rmse'),
                     'validation_mae': trial.get('validation_mae'),
                     'training_seconds': trial.get('training_seconds'),
+                    'trial_wall_time_s': trial.get('trial_wall_time_s'),
+                    'wall_time_complete': trial.get('wall_time_complete', False),
+                    'complexity': json.dumps(trial.get('complexity')),
+                    'input_shape': json.dumps(trial.get('input_shape')),
                     'error': trial.get('error'),
                     'parameters': json.dumps(trial['parameters'], ensure_ascii=False),
                     'training_run_id': trial.get('training_run_id'),
@@ -618,9 +849,7 @@ def export_search(state, manifest):
                     **trial['params'],
                 }
             )
-    pd.DataFrame(rows).to_csv(
-        Path(manifest).with_name('tuning_results.csv'), index=False
-    )
+    write_csv(Path(manifest).with_name('tuning_results.csv'), pd.DataFrame(rows))
 
 
 def _print_trial(model, space, trial, record):
@@ -643,12 +872,12 @@ def _print_trial(model, space, trial, record):
     if trial['status'] == 'completed':
         print(
             f'  VAL RMSE={trial["validation_rmse"]:.6f} kW; MAE={trial["validation_mae"]:.6f} kW; '
-            f'time={trial["training_seconds"]:.1f}s; best VAL RMSE={best}',
+            f'wall time={trial["trial_wall_time_s"]:.1f}s; best VAL RMSE={best}',
             flush=True,
         )
     else:
         print(
-            f'  Reason: {trial["error"]}; time={trial["training_seconds"]:.1f}s; best VAL RMSE={best}',
+            f'  Reason: {trial["error"]}; wall time={trial["trial_wall_time_s"]:.1f}s; best VAL RMSE={best}',
             flush=True,
         )
 
@@ -691,7 +920,7 @@ def tune(config, state, manifest, frame):
     validate_search(config)
     settings = config['tuning']
     records = state.setdefault('tuning', {})
-    for model in ('XGBoost', 'CNN_LSTM'):
+    for model in (state['selected_model'],):
         for space in SPACE_NAMES:
             key = model + '/' + space
             pool = state['feature_spaces'][space]
@@ -703,6 +932,7 @@ def tune(config, state, manifest, frame):
             defaults = config['models'][model]
             study = _restore_search(key, record, config, model, pool)
             while len(record['trials']) < settings['trials_per_space']:
+                started = perf_counter()
                 number = len(record['trials'])
                 study.sampler = optuna.samplers.TPESampler(
                     seed=config['seed'] + number,
@@ -723,6 +953,8 @@ def tune(config, state, manifest, frame):
                 item = {
                     'number': number,
                     'status': 'started',
+                    'started_at': datetime.now().astimezone().isoformat(),
+                    'trial_wall_time_s': 0.0,
                     'params': dict(trial.params),
                     'parameters': params,
                     'subset': subset,
@@ -735,11 +967,11 @@ def tune(config, state, manifest, frame):
                 record['trials'].append(item)
                 write_json(manifest, state)
                 print(
-                    f'TPE {model} {space} trial={number + 1}/{settings["trials_per_space"]} PRE={pre} subset={subset}',
+                    f'TPE {model} | space={SPACE_NAMES.index(space) + 1}/{len(SPACE_NAMES)} {space} | trial={number + 1}/{settings["trials_per_space"]} ({100 * number / settings["trials_per_space"]:.0f}% attempted) | PRE={pre} subset={subset}',
                     flush=True,
                 )
                 attempt_count = len(state.get('attempts', []))
-                started = perf_counter()
+                fatal = None
                 try:
                     result = _fit_trial(candidate, arm, model, state, manifest, frame)
                     value = result['validation_rmse']
@@ -751,9 +983,9 @@ def tune(config, state, manifest, frame):
                         validation_mae=result['validation_mae'],
                         result=result,
                         training_run_id=result['training_run_id'],
-                        training_seconds=result.get(
-                            'training_seconds', perf_counter() - started
-                        ),
+                        training_seconds=result.get('training_seconds'),
+                        complexity=result.get('complexity'),
+                        input_shape=result.get('input_shape'),
                     )
                     study.tell(trial, value)
                 except (Exception, KeyboardInterrupt) as error:
@@ -762,24 +994,25 @@ def tune(config, state, manifest, frame):
                         if isinstance(error, KeyboardInterrupt)
                         else 'failed',
                         error=str(error) or type(error).__name__,
-                        training_seconds=perf_counter() - started,
+                        training_seconds=getattr(error, 'training_seconds', None),
                     )
                     if len(state.get('attempts', [])) > attempt_count:
                         item['training_run_id'] = state['attempts'][-1]['run_id']
                     study.tell(trial, state=optuna.trial.TrialState.FAIL)
-                    write_json(manifest, state)
-                    export_search(state, manifest)
-                    _prune_models(state, manifest)
-                    _print_trial(model, space, item, record)
-                    if isinstance(
+                    if is_gpu_failure(error) or isinstance(
                         error, (KeyboardInterrupt, OSError, StudyChangedError)
                     ):
-                        raise
-                    continue
+                        fatal = error
+                item.update(trial_wall_time_s=perf_counter() - started,
+                            wall_time_complete=True,
+                            finished_at=datetime.now().astimezone().isoformat())
+                _prune_models(state, manifest)
+                item['trial_wall_time_s'] = perf_counter() - started
                 write_json(manifest, state)
                 export_search(state, manifest)
-                _prune_models(state, manifest)
                 _print_trial(model, space, item, record)
+                if fatal is not None:
+                    raise fatal
             completed = [
                 item for item in record['trials'] if item['status'] == 'completed'
             ]
@@ -813,15 +1046,30 @@ def _freeze_winners(config, state, manifest):
         frozen['data']['pre'] = best['pre']
         frozen['models'][record['model']] = best['parameters']
         state['frozen_configs'][key] = frozen
-    for model in ('XGBoost', 'CNN_LSTM'):
+    for model in (state['selected_model'],):
         best = min(
             (row for row in state['screening'] if row['model'] == model),
             key=lambda row: (row['validation_rmse'], SPACE_NAMES.index(row['arm'])),
         )
         state['selected'][model] = best['arm']
-    state['parameters_frozen'] = True
+    state.update(parameters_frozen=True, tuning_completed=True,
+                 status='selection_frozen',
+                 selection_criterion='mean per-horizon validation RMSE in kW',
+                 search_finished_at=datetime.now().astimezone().isoformat(),
+                 )
     Path(manifest).with_name('frozen_config.yaml').write_text(
         yaml.safe_dump(state['frozen_configs'], sort_keys=False), encoding='utf-8'
     )
     export_search(state, manifest)
     write_json(manifest, state)
+
+
+if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Internal isolated GPU worker')
+    parser.add_argument('--worker', choices=('tuning',), required=True)
+    parser.add_argument('--resume', required=True)
+    parser.add_argument('--run-id', required=True)
+    options = parser.parse_args()
+    _worker(options.worker, options.resume, options.run_id)

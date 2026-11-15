@@ -15,9 +15,10 @@ from .data import (
     SUPPORTED_FEATURES,
     feature_names,
     validate_plant,
+    partition_bounds,
 )
 
-CONTRACT_VERSION = 6
+CONTRACT_VERSION = 7
 LEGACY_FEATURE_KEYS = {'physics', 'candidate_subset', 'selected_features'}
 
 
@@ -76,6 +77,15 @@ def upgrade_legacy_features(data):
 
 def _validate_data_settings(data):
     """Check physical units, target correction and output constraints."""
+    if data.get('time_split'):
+        import pandas as pd
+
+        dates = data['time_split']
+        if set(dates) != {'timezone', 'train_start', 'train_end', 'val_end', 'test_end'}:
+            raise ValueError('time_split requires timezone and four date boundaries.')
+        partition_bounds(pd.DataFrame(index=pd.date_range('2018', periods=1)), data)
+    if type(data.get('sensor_cleaning', False)) is not bool:
+        raise ValueError('data.sensor_cleaning must be boolean.')
     floors = data.get('ratio_floors', {})
     for key in ('pac_kw', 'clear_ghi_kw_m2'):
         value = floors.get(key, 0.05 if key == 'pac_kw' else 0.02)
@@ -203,6 +213,10 @@ def validate_config(config):
 def validate_search(config):
     """Check the fixed attempt budget, allowed PRE values and feature selector."""
     settings = config['tuning']
+    for model, key in (('XGBoost', 'n_estimators'), ('CNN_LSTM', 'epochs')):
+        value = config['models'][model].get(key)
+        if type(value) is not int or value < 1:
+            raise ValueError(f'models.{model}.{key} must be a positive integer.')
     for key in ('trials_per_space', 'startup_trials'):
         if type(settings.get(key)) is not int or settings[key] < 1:
             raise ValueError(f'tuning.{key} must be a positive integer.')
@@ -271,7 +285,6 @@ def data_contract(data):
         'resolution',
         'scaler',
         'correct_power',
-        'split',
         'p_nom_kw',
         'plant',
         'constraints',
@@ -279,9 +292,12 @@ def data_contract(data):
     return copy.deepcopy(
         {
             **{key: data[key] for key in keys},
+            'split': data.get('split'),
+            'time_split': data.get('time_split'),
             'solar': data.get('solar'),
             'ratio_floors': data.get('ratio_floors'),
             'origin_pre': data.get('origin_pre'),
+            'sensor_cleaning': data.get('sensor_cleaning', False),
             'eligibility_features': data.get('eligibility_features'),
             'evaluation': data.get('evaluation'),
             'power_correction': data.get('power_correction'),
@@ -309,24 +325,6 @@ def output_paths(config, run_id=None, study_dir=None):
     return paths
 
 
-def validate_study(settings):
-    """Validate bootstrap settings and the minimum number of TEST origins."""
-    if not isinstance(settings, dict):
-        raise ValueError('study must be a configuration mapping.')
-    for key in (
-        'bootstrap_resamples',
-        'bootstrap_seed',
-        'bootstrap_block_length',
-        'min_test_origins',
-    ):
-        if type(settings.get(key)) is not int or settings[key] < (
-            0 if key == 'bootstrap_seed' else 1
-        ):
-            raise ValueError(f'study.{key} must be a valid integer.')
-    if settings['bootstrap_resamples'] < 1000:
-        raise ValueError('study.bootstrap_resamples must be at least 1000.')
-
-
 def smoke_config(config):
     """Copy an experiment and apply the shared execution-only YAML overrides."""
     result = copy.deepcopy(config)
@@ -334,6 +332,8 @@ def smoke_config(config):
         project_path('config/smoke.yaml').read_text(encoding='utf-8')
     )
     result['data'].update(overrides['data'])
+    result['data'].pop('time_split', None)
+    result['data']['split'] = [0.7, 0.2, 0.1]
     for model, params in overrides['models'].items():
         result['models'][model].update(params)
     result['smoke_study'] = True
@@ -343,3 +343,18 @@ def smoke_config(config):
         )
     result['data'].pop('origin_pre', None)
     return validate_config(result)
+
+
+def validate_runtime(settings):
+    """Validate the GPU ordinal and training measurement interval."""
+    if type(settings.get('gpu_id')) is not int or settings['gpu_id'] < 0:
+        raise ValueError('runtime.gpu_id must be a nonnegative CUDA ordinal.')
+    interval = settings.get('sample_interval_s')
+    if isinstance(interval, bool) or not isinstance(interval, (int, float)) or not np.isfinite(interval) or interval <= 0:
+        raise ValueError('runtime.sample_interval_s must be finite and positive.')
+
+
+def validate_study(settings):
+    """Require enough TEST origins for evaluation."""
+    if not isinstance(settings, dict) or type(settings.get('min_test_origins')) is not int or settings['min_test_origins'] < 1:
+        raise ValueError('study.min_test_origins must be a positive integer.')

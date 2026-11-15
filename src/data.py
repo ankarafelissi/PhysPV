@@ -1,10 +1,12 @@
 """PV features, timestamped inputs, chronological windows and train-only scaling."""
 
 import copy
+from time import perf_counter
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from .runtime import project_path
+from .cleaning import clean_training_data
 
 
 PHYSICS_FEATURES = ('Pac', 'Pdc', 'TempModule', 'TempCell')
@@ -280,7 +282,8 @@ def build_features(frame, config):
         pac = physical['Pac'].to_numpy(float)
         active = pac > rules['minimum_pac_kw']
         replace = active & (np.abs(measured - pac) > rules['relative_deviation'] * pac)
-        replace |= ~np.isfinite(measured) & np.isfinite(pac)
+        if not config.get('sensor_cleaning', False):
+            replace |= ~np.isfinite(measured) & np.isfinite(pac)
         corrected = np.where(replace, pac, measured)
         result[config['target']] = np.where(
             corrected <= rules['zero_floor_kw'], 0, corrected
@@ -350,15 +353,33 @@ def build_features(frame, config):
     return result
 
 
+def partition_bounds(frame, data):
+    """Return half-open row bounds; explicit dates take priority over ratios."""
+    dates = data.get('time_split')
+    if dates:
+        zone = dates['timezone']
+        index = frame.index
+        index = index.tz_localize(zone) if index.tz is None else index.tz_convert(zone)
+        edges = [pd.Timestamp(dates[key]) for key in
+                 ('train_start', 'train_end', 'val_end', 'test_end')]
+        edges = [edge.tz_localize(zone) if edge.tz is None
+                 else edge.tz_convert(zone) for edge in edges]
+        if any(right <= left for left, right in zip(edges, edges[1:])):
+            raise ValueError('time_split boundaries must be strictly increasing.')
+        positions = index.searchsorted(edges).tolist()
+    else:
+        ratios = np.asarray(data['split'], dtype=float)
+        if ratios.shape != (3,) or np.any(ratios <= 0) or not np.isclose(ratios.sum(), 1):
+            raise ValueError('split must contain three positive fractions summing to one.')
+        positions = [0, int(np.floor(len(frame) * ratios[0] + 1e-9)),
+                     int(np.floor(len(frame) * sum(ratios[:2]) + 1e-9)), len(frame)]
+    return [(name, positions[i], positions[i + 1])
+            for i, name in enumerate(('TRAIN', 'VAL', 'TEST'))]
+
+
 def _correction_audit(frame, data):
     """Summarize target corrections and daylight counts for each time split."""
-    train_end = int(len(frame) * data['split'][0])
-    val_end = int(len(frame) * sum(data['split'][:2]))
-    boundaries = (
-        ('TRAIN', 0, train_end),
-        ('VAL', train_end, val_end),
-        ('TEST', val_end, len(frame)),
-    )
+    boundaries = partition_bounds(frame, data)
     audit = []
     for label, start, end in boundaries:
         part = frame.iloc[start:end]
@@ -386,11 +407,15 @@ def prepare_spaces(config, directory):
         data['target'],
         *[name for name in SUPPORTED_FEATURES if name in EXPANDED_FEATURES],
     ]
+    started = perf_counter()
     frame = build_features(load_data(data), data)
+    shared_seconds = perf_counter() - started
     audit = _correction_audit(frame, data)
-    end = int(np.floor(len(frame) * data['split'][0] + 1e-9))
+    _, start, end = partition_bounds(frame, data)[0]
     columns = [data['target'], *EXPANDED_FEATURES]
-    train = frame.iloc[:end].loc[frame.attrs['eligible_rows'][:end], columns].dropna()
+    train = frame.iloc[start:end].loc[
+        frame.attrs['eligible_rows'][start:end], columns
+    ].dropna()
     if len(train) < 2:
         raise ValueError(
             'Insufficient finite TRAIN observations for feature selection.'
@@ -435,6 +460,10 @@ def prepare_spaces(config, directory):
         ),
     ]
     frame.attrs['preprocessing'] = {
+        'shared_feature_preparation_seconds': shared_seconds,
+        'physics_incremental_seconds': None,
+        'cost_scope': 'Shared loading, cleaning and feature generation; physical costs are not reliably separable.',
+        'sensor_cleaning': frame.attrs.get('sensor_cleaning'),
         'audit': audit,
         'feature_selection': [
             {
@@ -514,6 +543,10 @@ def load_data(config):
         if type(limit) is not int or limit < 1:
             raise ValueError('max_rows must be a positive integer or null.')
         frame = frame.iloc[:limit].copy()
+    if config.get('sensor_cleaning', False):
+        if config['resolution'] != '5min':
+            raise ValueError('Sensor cleaning supports only five-minute data.')
+        frame, _ = clean_training_data(frame)
     return frame
 
 
@@ -556,12 +589,7 @@ def prepare_data(frame, config, scalers=None, partitions=('TRAIN', 'VAL', 'TEST'
     missing = set(features + [target]) - set(frame.columns)
     if missing:
         raise ValueError('Missing columns: ' + ', '.join(sorted(missing)))
-    ratios = np.asarray(config['split'], dtype=float)
-    if ratios.shape != (3,) or np.any(ratios <= 0) or not np.isclose(ratios.sum(), 1):
-        raise ValueError('split must contain three positive fractions summing to one.')
     n = len(frame)
-    train_end = int(np.floor(n * ratios[0] + 1e-9))
-    val_end = int(np.floor(n * (ratios[0] + ratios[1]) + 1e-9))
     values = frame[features].to_numpy(dtype=float)
     labels = frame[target].to_numpy(dtype=float)
     eligibility = np.asarray(
@@ -570,15 +598,12 @@ def prepare_data(frame, config, scalers=None, partitions=('TRAIN', 'VAL', 'TEST'
     if eligibility.shape != (n,):
         raise ValueError('Feature eligibility mask does not match the time axis.')
     splits = {}
-    boundaries = [
-        ('TRAIN', 0, train_end),
-        ('VAL', train_end, val_end),
-        ('TEST', val_end, n),
-    ]
+    boundaries = partition_bounds(frame, config)
     for name, start, end in boundaries:
         if name not in partitions:
             continue
-        origins = np.arange(max(origin_pre, start - 1), end - horizon)
+        first = start + origin_pre if name == 'TRAIN' else start - 1
+        origins = np.arange(max(origin_pre, first), end - horizon)
         origins = np.asarray(
             [
                 t

@@ -1,4 +1,4 @@
-"""Command-line entry point for prepare, train, evaluate and report stages."""
+"""Prepare data, train forecasting models and evaluate frozen winners."""
 
 import argparse
 from src.runtime import configure_runtime
@@ -23,13 +23,17 @@ def main():
     stage_help = {
         'train': 'Search on TRAIN/VAL and freeze all space winners',
         'evaluate': 'Evaluate frozen winners on TEST once',
-        'report': 'Generate tables and figures from saved predictions',
     }
     for stage, description in stage_help.items():
         command = commands.add_parser(stage, help=description)
         command.add_argument(
             '--resume', required=True, help='manifest.json printed by prepare'
         )
+        if stage == 'train':
+            command.add_argument(
+                '--model', choices=('XGBoost', 'CNN_LSTM'),
+                help='Required on first train; saved model is used on resume',
+            )
     args = parser.parse_args()
     if args.stage is None:
         parser.print_help()
@@ -42,7 +46,7 @@ def main():
         config = load_config(args.config)
         run('prepare', config=smoke_config(config) if args.smoke else config)
     else:
-        run(args.stage, manifest=args.resume)
+        run(args.stage, manifest=args.resume, model=getattr(args, 'model', None))
 
 
 if __name__ == '__main__':

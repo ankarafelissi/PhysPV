@@ -32,6 +32,8 @@ class DataTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.config = load_config('config/config.yaml')
+        self.config['data'].pop('time_split')
+        self.config['data']['split'] = [0.7, 0.2, 0.1]
         raw = self.root / 'raw.h5'
         raw.write_text('synthetic input', encoding='utf-8')
         self.config['data'].update(pre=2, horizon=2, correct_power=False)
@@ -102,6 +104,32 @@ class DataTests(unittest.TestCase):
             test, _ = prepare_data(frame, config, scalers=scalers, partitions=('TEST',))
         self.assertEqual(list(test), ['TEST'])
         np.testing.assert_array_equal(test['TEST']['X'], parts['TEST']['X'])
+
+    def test_explicit_dates_bound_labels_and_train_only_scaling(self):
+        dates = load_config('config/config.yaml')['data']['time_split']
+        index = pd.date_range('2018-05-30', '2019-03-02', freq='6h')
+        frame = pd.DataFrame({'power': np.arange(len(index), dtype=float)}, index=index)
+        data = dict(pre=2, horizon=3, features=['power'], target='power',
+                    scaler='MinMax01', time_split=dates)
+        parts, scalers = prepare_data(frame, data)
+        bounds = [('TRAIN', '2018-06-01', '2018-12-01'),
+                  ('VAL', '2018-12-01', '2019-01-01'),
+                  ('TEST', '2019-01-01', '2019-03-01')]
+        for name, start, end in bounds:
+            labels = parts[name]['target_times']
+            self.assertTrue((labels >= np.datetime64(start)).all())
+            self.assertTrue((labels < np.datetime64(end)).all())
+        train_min = frame.loc['2018-06-01', 'power'].min()
+        self.assertEqual(scalers['X'].data_min_[0], train_min)
+        self.assertLess(scalers['Y'].data_max_[0], frame.loc['2018-12-01', 'power'].min())
+        changed = frame.copy()
+        changed.loc['2018-12-01':, 'power'] *= 100
+        _, other = prepare_data(changed, data)
+        np.testing.assert_array_equal(scalers['X'].data_max_, other['X'].data_max_)
+        np.testing.assert_array_equal(scalers['Y'].data_max_, other['Y'].data_max_)
+        zoned = frame.tz_localize('UTC').tz_convert('Europe/London')
+        aware, _ = prepare_data(zoned, data)
+        np.testing.assert_array_equal(parts['TEST']['Y'], aware['TEST']['Y'])
 
     def test_raw_targets_and_daylight_follow_target_timestamps(self):
         frame = build_features(self.frame, self.config['data'])

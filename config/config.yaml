@@ -13,8 +13,14 @@ data:
   features: ["P_Solar[kW]"]
   pre: 30
   horizon: 60
-  split: [0.7, 0.2, 0.1]
+  time_split:
+    timezone: UTC
+    train_start: '2018-06-01'
+    train_end: '2018-12-01'
+    val_end: '2019-01-01'
+    test_end: '2019-03-01'
   scaler: MinMax01
+  sensor_cleaning: true
   correct_power: true
   power_correction:
     # Explicit interpretation of the paper's >20% deviation rule.
@@ -74,10 +80,11 @@ models:
 
 output_dir: outputs
 
+runtime:
+  gpu_id: 0
+  sample_interval_s: 0.05
+
 study:
-  bootstrap_resamples: 2000
-  bootstrap_seed: 2026
-  bootstrap_block_length: 288
   min_test_origins: 500
 
 experiment:
