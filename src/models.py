@@ -3,7 +3,10 @@
 import json
 import math
 from pathlib import Path
+from contextlib import contextmanager
+from time import perf_counter
 import numpy as np
+from .runtime import GPUError, ResourceMonitor, gpu_identity, synchronize_gpu
 
 SUPPORTED_MODELS = ('XGBoost', 'CNN_LSTM')
 
@@ -25,7 +28,7 @@ class XGBoostForecaster:
             raise ValueError('X must be a 2D feature matrix or 3D history window.')
         return x.reshape(len(x), -1)
 
-    def fit(self, x, y, x_val, y_val):
+    def fit(self, x, y, x_val, y_val, progress=False):
         """Fit every horizon on the same flattened history and validation split."""
         from xgboost import XGBRegressor
 
@@ -37,12 +40,21 @@ class XGBoostForecaster:
         if y.ndim != 2 or y_val.ndim != 2 or y.shape[1] != y_val.shape[1]:
             raise ValueError('Targets must have shape (samples, horizon).')
         self.estimators = []
+        started = perf_counter()
+        if progress:
+            print(f'  XGBoost fitting: 0/{y.shape[1]} horizons', flush=True)
         for step in range(y.shape[1]):
             estimator = XGBRegressor(**self.params)
             estimator.fit(
                 x, y[:, step], eval_set=[(x_val, y_val[:, step])], verbose=False
             )
             self.estimators.append(estimator)
+            if progress:
+                done = step + 1
+                bar = '=' * (20 * done // y.shape[1])
+                print(f'  [{bar:<20}] {done}/{y.shape[1]} horizons '
+                      f'({100 * done / y.shape[1]:.0f}%) | '
+                      f'elapsed={perf_counter() - started:.1f}s', flush=True)
         return self
 
     def predict(self, x):
@@ -78,7 +90,11 @@ class XGBoostForecaster:
         for step in range(metadata['horizon']):
             estimator = XGBRegressor()
             estimator.load_model(str(directory / f'step_{step + 1}.json'))
-            estimator.set_params(n_jobs=result.params.get('n_jobs', 2))
+            estimator.set_params(
+                n_jobs=result.params.get('n_jobs', 2),
+                predictor=result.params.get('predictor', 'auto'),
+                gpu_id=result.params.get('gpu_id', 0),
+            )
             result.estimators.append(estimator)
         return result
 
@@ -242,7 +258,32 @@ def _callbacks(tf, checkpoint_path, logger, patience):
     ]
 
 
-def _train_cnn_lstm(params, splits, seed, checkpoint_path, logger):
+@contextmanager
+def fit_measurement(gpu_id, measurement):
+    """Time the training procedure, including validation and required checkpoints."""
+    from contextlib import nullcontext
+
+    monitor = (ResourceMonitor(measurement['device'], measurement['sample_interval_s'])
+               if measurement is not None else nullcontext())
+    if gpu_id is not None:
+        synchronize_gpu(gpu_id)
+    timing = {}
+    with monitor as resources:
+        started = perf_counter()
+        try:
+            yield timing
+            if gpu_id is not None:
+                synchronize_gpu(gpu_id)
+        finally:
+            timing['fit_time_s'] = perf_counter() - started
+            if measurement is not None:
+                measurement.update(timing)
+    if measurement is not None:
+        measurement.update(resources.values)
+
+
+def _train_cnn_lstm(params, splits, seed, checkpoint_path, logger,
+                    gpu_id=None, measurement=None):
     """Fit once in chronological order and restore the best validation checkpoint."""
     train, val = splits['TRAIN'], splits['VAL']
     import tensorflow as tf
@@ -251,23 +292,27 @@ def _train_cnn_lstm(params, splits, seed, checkpoint_path, logger):
     tf.keras.utils.set_random_seed(seed)
     model = build_model(params, train['X'].shape[1:], train['Y_scaled'].shape[1])
     callbacks = _callbacks(tf, checkpoint_path, logger, params['patience'])
-    history = model.fit(
-        train['X'],
-        train['Y_scaled'],
-        validation_data=(val['X'], val['Y_scaled']),
-        epochs=params['epochs'],
-        batch_size=params['batch_size'],
-        shuffle=False,
-        verbose=params.get('verbose', 2),
-        callbacks=callbacks,
-    )
-    if not checkpoint_path.with_suffix('.index').exists():
-        raise RuntimeError('Training ended without a valid best checkpoint.')
-    model.load_weights(str(checkpoint_path))
+    with fit_measurement(gpu_id, measurement) as timing:
+        history = model.fit(
+            train['X'], train['Y_scaled'],
+            validation_data=(val['X'], val['Y_scaled']),
+            epochs=params['epochs'], batch_size=params['batch_size'],
+            shuffle=False, verbose=params.get('verbose', 2), callbacks=callbacks,
+        )
+        if not checkpoint_path.with_suffix('.index').exists():
+            raise RuntimeError('Training ended without a valid best checkpoint.')
+        model.load_weights(str(checkpoint_path))
+    history.history['fit_time_s'] = timing['fit_time_s']
+    history.history['epochs_completed'] = len(history.epoch)
+    history.history['best_epoch'] = int(np.nanargmin(history.history['val_loss'])) + 1
+    history.history['checkpoint_monitor'] = 'val_loss'
+    if gpu_id is not None:
+        verify_gpu_model(model, 'CNN_LSTM', train['X'][:1])
     return model, history.history
 
 
-def train_model(name, params, splits, seed, checkpoint_path=None, logger=None):
+def train_model(name, params, splits, seed, checkpoint_path=None, logger=None,
+                gpu_id=None, measurement=None):
     """Fit the named model using TRAIN/VAL and return (model, history).
 
     CNN_LSTM requires a checkpoint path and logger. TEST is never used here.
@@ -275,16 +320,92 @@ def train_model(name, params, splits, seed, checkpoint_path=None, logger=None):
     if name == 'CNN_LSTM':
         if checkpoint_path is None or logger is None:
             raise ValueError('CNN-LSTM training requires a checkpoint path and logger.')
-        return _train_cnn_lstm(params, splits, seed, checkpoint_path, logger)
+        return _train_cnn_lstm(
+            params, splits, seed, checkpoint_path, logger, gpu_id, measurement
+        )
     if name == 'XGBoost':
         train, val = splits['TRAIN'], splits['VAL']
-        model = XGBoostForecaster(params, seed).fit(
-            train['X'], train['Y_scaled'], val['X'], val['Y_scaled']
-        )
+        model = XGBoostForecaster(params, seed)
+        with fit_measurement(gpu_id, measurement) as timing:
+            model.fit(train['X'], train['Y_scaled'], val['X'], val['Y_scaled'],
+                      progress=measurement is None)
+        if gpu_id is not None:
+            verify_gpu_model(model, name, train['X'][:1])
         return model, {
-            str(i + 1): m.evals_result() for i, m in enumerate(model.estimators)
+            **{str(i + 1): estimator.evals_result()
+               for i, estimator in enumerate(model.estimators)},
+            'fit_time_s': timing['fit_time_s'],
+            'best_iteration': [int(m.best_iteration) for m in model.estimators],
+            'actual_boosting_rounds': [m.get_booster().num_boosted_rounds()
+                                       for m in model.estimators],
+            'n_estimators': params['n_estimators'],
         }
     raise ValueError(f'Unsupported model: {name}; choose {SUPPORTED_MODELS}')
+
+
+def configure_gpu(name, gpu_id):
+    """Initialize the requested framework on one GPU before creating models."""
+    if name == 'CNN_LSTM':
+        import tensorflow as tf
+
+        devices = tf.config.list_physical_devices('GPU')
+        if gpu_id >= len(devices):
+            raise GPUError(f'TensorFlow GPU {gpu_id} is unavailable.')
+        try:
+            tf.config.set_visible_devices(devices[gpu_id], 'GPU')
+            tf.config.experimental.set_memory_growth(devices[gpu_id], True)
+        except RuntimeError as error:
+            raise GPUError('GPU visibility/memory growth must be set before initialization.') from error
+    return gpu_identity(gpu_id)
+
+
+def verify_gpu_model(model, name, request):
+    """Verify GPU weights/output or the saved XGBoost updater/predictor configuration."""
+    if name == 'XGBoost':
+        for estimator in model.estimators:
+            settings = estimator.get_booster().save_config()
+            if 'grow_gpu_hist' not in settings or 'gpu_predictor' not in settings:
+                raise GPUError('XGBoost did not retain GPU training and prediction settings.')
+        model.predict(request)
+        return 'gpu_predictor'
+    if not model.weights or any('GPU:' not in weight.device.upper() for weight in model.weights):
+        raise GPUError('CNN-LSTM model variables are not on the GPU.')
+    predict_scaled(model, name, request, single_request=True)
+    return '/GPU:0'
+
+
+def check_gpu(name, params, gpu_id):
+    """Perform a tiny real GPU fit; failures stop before any TPE attempt is spent."""
+    try:
+        device = configure_gpu(name, gpu_id)
+        if name == 'XGBoost':
+            from xgboost import XGBRegressor
+
+            if params.get('tree_method') != 'gpu_hist':
+                raise GPUError('XGBoost 1.7.6 GPU training requires tree_method=gpu_hist.')
+
+            probe = XGBRegressor(n_estimators=1, max_depth=1, n_jobs=1,
+                                 tree_method='gpu_hist', predictor='gpu_predictor',
+                                 gpu_id=gpu_id)
+            x = np.arange(16, dtype=np.float32).reshape(8, 2)
+            probe.fit(x, np.arange(8, dtype=np.float32))
+            wrapper = XGBoostForecaster()
+            wrapper.estimators = [probe]
+            verify_gpu_model(wrapper, name, x[:1])
+        else:
+            import tensorflow as tf
+
+            tf.keras.utils.set_random_seed(11)
+            probe = build_model(params, (2, 1), 1)
+            x = np.ones((4, 2, 1), dtype=np.float32)
+            probe.fit(x, np.ones((4, 1)), epochs=1, verbose=0)
+            verify_gpu_model(probe, name, x[:1])
+            del probe
+            tf.keras.backend.clear_session()
+        synchronize_gpu(gpu_id)
+        return device
+    except Exception as error:
+        raise GPUError(f'{name} GPU preflight failed: {error}') from error
 
 
 def save_model(model, name, directory):
@@ -308,9 +429,19 @@ def load_model(name, directory):
     raise ValueError(f'Unsupported model: {name}')
 
 
-def predict_scaled(model, name, windows):
+def predict_scaled(model, name, windows, single_request=False):
     """Return forecasts in target-scaler units with shape (origins, horizon)."""
+    if single_request and len(windows) != 1:
+        raise ValueError('Online inference requires exactly one forecast origin.')
     if name == 'CNN_LSTM':
+        if single_request:
+            import tensorflow as tf
+
+            with tf.device('/GPU:0'):
+                output = model(tf.convert_to_tensor(windows), training=False)
+            if 'GPU:' not in output.device.upper():
+                raise GPUError('CNN-LSTM online inference did not produce a GPU tensor.')
+            return output.numpy()
         return model.predict(windows, verbose=0)
     if name == 'XGBoost':
         return model.predict(windows)

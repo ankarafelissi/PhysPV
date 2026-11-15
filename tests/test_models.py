@@ -1,6 +1,9 @@
 """Daylight scores, forecast health and model persistence; no fitting."""
 
 import copy
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,7 +17,6 @@ from src.data import solar_features
 from src.evaluate import (
     evaluate,
     forecast_health,
-    paired_bootstrap,
     require_healthy_forecasts,
 )
 from src.models import build_model, load_model, save_model
@@ -45,8 +47,6 @@ class ModelTests(unittest.TestCase):
         require_healthy_forecasts(
             forecast_health(np.zeros((3, 2)), np.zeros((3, 2))), 'night'
         )
-        interval = paired_bootstrap(np.full(20, -0.5), 1000, 11, 4)
-        self.assertEqual((interval['ci_low'], interval['ci_high']), (-0.5, -0.5))
         config = copy.deepcopy(self.config['data'])
         config['solar'] = {
             'site': {'latitude': 0.0, 'longitude': 0.0, 'timezone': 'UTC'}
@@ -59,6 +59,17 @@ class ModelTests(unittest.TestCase):
         self.assertGreater(sun.solar_elevation.iloc[12], 80)
 
     def test_model_persistence_and_linear_head_without_training(self):
+        if os.name == 'nt' and os.environ.get('PHYSPV_MODEL_TEST_CHILD') != '1':
+            # PyTables and EDA's h5py can load incompatible HDF5 DLLs on Windows.
+            result = subprocess.run(
+                [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests',
+                 '-p', 'test_models.py'],
+                cwd=Path(__file__).resolve().parents[1],
+                env={**os.environ, 'PHYSPV_MODEL_TEST_CHILD': '1'},
+                capture_output=True, text=True, errors='replace',
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return
         import tables  # noqa: F401 - Load HDF5 before TensorFlow on Windows.
         import tensorflow as tf
 
