@@ -72,3 +72,9 @@ data/processed/*
 *.temp
 *.bak
 ~$*
+
+# Local build residue and caches
+.uv-cache/
+report/*.aux
+report/*.out
+eda/*.html
