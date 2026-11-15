@@ -1,0 +1,21 @@
+{
+  "caption": "Descriptive frozen-forecast cases at 30, 120 and 300 minute leads, aligned by target time. Black denotes the model-corrected target, not untouched meter output. Days are selected nearest the 10th/90th percentile of mean absolute consecutive five-minute target ramp divided by daily target P95, using common daylight timestamps across all three leads, at least 72 targets, 60 adjacent pairs and target P95 >= 2 kW. Selection uses targets only, not prediction errors. Missing intervals break curves. These post-study examples are illustrative, not confirmatory or representative of every fold.",
+  "data": {
+    "selected_days": [
+      {
+        "day": "2019-04-20",
+        "fold": 2,
+        "n_targets": 171,
+        "normalized_ramp": 0.023903495022866813
+      },
+      {
+        "day": "2019-08-29",
+        "fold": 4,
+        "n_targets": 167,
+        "normalized_ramp": 0.10414737713559256
+      }
+    ],
+    "candidate_days": 129,
+    "source_csv": "outputs\\research_v2\\supplementary\\additional_analyses\\case_prediction_curves.csv"
+  }
+}

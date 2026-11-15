@@ -1,0 +1,183 @@
+{
+  "caption": "Unweighted comparison of deployment-relevant dimensions. Resource values are Fold 1 medians; error summarizes four folds. Worst relative RMSE is the largest signed fold difference from Original. Dependency counts include historical target/timestamp where selected and derived-feature raw inputs, but are not sensor prices. Shared target correction and eligibility use meteorological inputs even for Intrinsic. No composite score or universal winner is asserted.",
+  "data": {
+    "cost": [
+      {
+        "space": "Original",
+        "tpe_attempts": 40,
+        "tpe_search_seconds": 5312.843099700001,
+        "tpe_time_complete": true,
+        "benchmark_repeats": 5,
+        "gpu_memory_scope": "device",
+        "fit_time_s_median": 273.2448145,
+        "fit_time_s_iqr": 1.3127905000000055,
+        "peak_gpu_vram_mb_median": 618.09765625,
+        "peak_gpu_vram_mb_iqr": 0.0,
+        "peak_cpu_ram_mb_median": 1156.6171875,
+        "peak_cpu_ram_mb_iqr": 8.0390625,
+        "inference_p50_ms_median": 621.8889999999817,
+        "inference_p50_ms_iqr": 1.9164499999817508,
+        "inference_p95_ms_median": 668.0742100000089,
+        "inference_p95_ms_iqr": 13.80232000003332,
+        "model_size_mb_median": 130.889422416687,
+        "model_size_mb_iqr": 0.0
+      },
+      {
+        "space": "Expanded-Pearson",
+        "tpe_attempts": 40,
+        "tpe_search_seconds": 4973.102100000001,
+        "tpe_time_complete": true,
+        "benchmark_repeats": 5,
+        "gpu_memory_scope": "device",
+        "fit_time_s_median": 113.4637345,
+        "fit_time_s_iqr": 4.530330200000009,
+        "peak_gpu_vram_mb_median": 666.09765625,
+        "peak_gpu_vram_mb_iqr": 0.0,
+        "peak_cpu_ram_mb_median": 905.84375,
+        "peak_cpu_ram_mb_iqr": 10.109375,
+        "inference_p50_ms_median": 338.29959999998493,
+        "inference_p50_ms_iqr": 1.1425999999943317,
+        "inference_p95_ms_median": 520.9287750000016,
+        "inference_p95_ms_iqr": 43.60754999998602,
+        "model_size_mb_median": 57.79715919494629,
+        "model_size_mb_iqr": 0.0
+      },
+      {
+        "space": "Expanded-Physics",
+        "tpe_attempts": 40,
+        "tpe_search_seconds": 3933.528254399997,
+        "tpe_time_complete": false,
+        "benchmark_repeats": 5,
+        "gpu_memory_scope": "device",
+        "fit_time_s_median": 50.3104663,
+        "fit_time_s_iqr": 3.8516276999999945,
+        "peak_gpu_vram_mb_median": 492.09765625,
+        "peak_gpu_vram_mb_iqr": 0.0,
+        "peak_cpu_ram_mb_median": 675.1328125,
+        "peak_cpu_ram_mb_iqr": 15.4765625,
+        "inference_p50_ms_median": 215.9751500000056,
+        "inference_p50_ms_iqr": 33.77314999999825,
+        "inference_p95_ms_median": 387.2510050000002,
+        "inference_p95_ms_iqr": 18.473229999990565,
+        "model_size_mb_median": 15.767468452453612,
+        "model_size_mb_iqr": 0.0
+      },
+      {
+        "space": "Intrinsic",
+        "tpe_attempts": 40,
+        "tpe_search_seconds": 3649.0854065000008,
+        "tpe_time_complete": true,
+        "benchmark_repeats": 5,
+        "gpu_memory_scope": "device",
+        "fit_time_s_median": 17.962508,
+        "fit_time_s_iqr": 4.503253699999998,
+        "peak_gpu_vram_mb_median": 474.09765625,
+        "peak_gpu_vram_mb_iqr": 0.0,
+        "peak_cpu_ram_mb_median": 497.1796875,
+        "peak_cpu_ram_mb_iqr": 24.66015625,
+        "inference_p50_ms_median": 205.31899999999936,
+        "inference_p50_ms_iqr": 0.2142500000043981,
+        "inference_p95_ms_median": 352.6788099999988,
+        "inference_p95_ms_iqr": 33.50894500000163,
+        "model_size_mb_median": 9.979092597961426,
+        "model_size_mb_iqr": 0.0
+      }
+    ],
+    "temporal": [
+      {
+        "space": "Original",
+        "fold_1_rmse_kw": 1.3954122940172329,
+        "fold_2_rmse_kw": 1.378425158975405,
+        "fold_3_rmse_kw": 0.9846848373152816,
+        "fold_4_rmse_kw": 0.9464601007614658,
+        "equal_fold_mean_rmse_kw": 1.1762455977673465,
+        "pooled_rmse_kw": 1.1477921082597455,
+        "worst_relative_degradation_percent": 0.0,
+        "cumulative_retraining_seconds": 1258.100412
+      },
+      {
+        "space": "Expanded-Pearson",
+        "fold_1_rmse_kw": 1.4152519228291214,
+        "fold_2_rmse_kw": 1.3653180175274915,
+        "fold_3_rmse_kw": 0.994392656718954,
+        "fold_4_rmse_kw": 0.9440037713434618,
+        "equal_fold_mean_rmse_kw": 1.1797415921047572,
+        "pooled_rmse_kw": 1.1511207144468418,
+        "worst_relative_degradation_percent": 1.4217754062329837,
+        "cumulative_retraining_seconds": 526.2306567
+      },
+      {
+        "space": "Expanded-Physics",
+        "fold_1_rmse_kw": 1.3523199438012363,
+        "fold_2_rmse_kw": 1.2950579278802372,
+        "fold_3_rmse_kw": 0.9765589158065672,
+        "fold_4_rmse_kw": 0.9201689518764106,
+        "equal_fold_mean_rmse_kw": 1.1360264348411129,
+        "pooled_rmse_kw": 1.1073556000950793,
+        "worst_relative_degradation_percent": -0.825230693190071,
+        "cumulative_retraining_seconds": 245.5597522
+      },
+      {
+        "space": "Intrinsic",
+        "fold_1_rmse_kw": 1.531837806564032,
+        "fold_2_rmse_kw": 1.7396342243327032,
+        "fold_3_rmse_kw": 1.43664277952051,
+        "fold_4_rmse_kw": 1.3555644387409862,
+        "equal_fold_mean_rmse_kw": 1.515919812289558,
+        "pooled_rmse_kw": 1.5272831159582658,
+        "worst_relative_degradation_percent": 45.89874090449899,
+        "cumulative_retraining_seconds": 79.6584163
+      }
+    ],
+    "configurations": [
+      {
+        "space": "Original",
+        "selected_features": "[\"P_Solar[kW]\", \"TEMPERATURE[degC]\", \"GHI[kW1m2]\", \"POA Irr[kW1m2]\"]",
+        "forecast_input_raw_dependencies": "[\"GHI[kW1m2]\", \"POA Irr[kW1m2]\", \"P_Solar[kW]\", \"TEMPERATURE[degC]\"]",
+        "shared_preprocessing_dependencies": "Common cleaning/eligibility and corrected target also use meteorological inputs; Intrinsic is not a sensor-free end-to-end pipeline.",
+        "pre": 110,
+        "best_trial_zero_based": 24,
+        "validation_rmse_kw": 0.9758224515764742,
+        "input_shape": "[111, 4]",
+        "parameters": "{\"n_estimators\": 700, \"max_depth\": 5, \"learning_rate\": 0.01209462475385658, \"subsample\": 0.9305930614962861, \"colsample_bytree\": 0.7600493230237102, \"min_child_weight\": 7, \"reg_lambda\": 2.02865865728258, \"objective\": \"reg:squarederror\", \"tree_method\": \"gpu_hist\", \"n_jobs\": 2, \"early_stopping_rounds\": 40, \"gpu_id\": 0, \"predictor\": \"gpu_predictor\"}",
+        "fixed_horizon_rounds": "[694, 700, 700, 686, 694, 697, 700, 684, 692, 607, 632, 667, 687, 576, 603, 644, 615, 699, 700, 656, 633, 616, 659, 584, 565, 497, 497, 595, 626, 585, 649, 654, 680, 600, 672, 579, 588, 700, 700, 700, 652, 700, 592, 611, 592, 681, 693, 699, 665, 700, 682, 690, 700, 698, 612, 673, 696, 696, 448, 615]"
+      },
+      {
+        "space": "Expanded-Pearson",
+        "selected_features": "[\"P_Solar[kW]\", \"GHI[kW1m2]\", \"TempCell\"]",
+        "forecast_input_raw_dependencies": "[\"GHI[kW1m2]\", \"POA Irr[kW1m2]\", \"P_Solar[kW]\", \"TEMPERATURE[degC]\", \"WIND_SPEED[m1s]\"]",
+        "shared_preprocessing_dependencies": "Common cleaning/eligibility and corrected target also use meteorological inputs; Intrinsic is not a sensor-free end-to-end pipeline.",
+        "pre": 100,
+        "best_trial_zero_based": 32,
+        "validation_rmse_kw": 0.9556909892637542,
+        "input_shape": "[101, 3]",
+        "parameters": "{\"n_estimators\": 700, \"max_depth\": 5, \"learning_rate\": 0.029177183282924474, \"subsample\": 0.816159791482132, \"colsample_bytree\": 0.7838696624175391, \"min_child_weight\": 3, \"reg_lambda\": 6.8568233026791, \"objective\": \"reg:squarederror\", \"tree_method\": \"gpu_hist\", \"n_jobs\": 2, \"early_stopping_rounds\": 40, \"gpu_id\": 0, \"predictor\": \"gpu_predictor\"}",
+        "fixed_horizon_rounds": "[297, 271, 325, 376, 364, 273, 297, 253, 264, 296, 263, 253, 280, 313, 338, 261, 310, 330, 279, 319, 339, 290, 265, 308, 302, 258, 266, 291, 239, 283, 242, 203, 245, 231, 247, 288, 239, 240, 242, 306, 284, 241, 279, 281, 281, 281, 265, 281, 279, 305, 278, 238, 197, 263, 279, 219, 243, 274, 274, 227]"
+      },
+      {
+        "space": "Expanded-Physics",
+        "selected_features": "[\"P_Solar[kW]\", \"TempCell\", \"HoursOfDay\"]",
+        "forecast_input_raw_dependencies": "[\"POA Irr[kW1m2]\", \"P_Solar[kW]\", \"TEMPERATURE[degC]\", \"WIND_SPEED[m1s]\", \"timestamp\"]",
+        "shared_preprocessing_dependencies": "Common cleaning/eligibility and corrected target also use meteorological inputs; Intrinsic is not a sensor-free end-to-end pipeline.",
+        "pre": 60,
+        "best_trial_zero_based": 34,
+        "validation_rmse_kw": 0.9329753066935108,
+        "input_shape": "[61, 3]",
+        "parameters": "{\"n_estimators\": 700, \"max_depth\": 3, \"learning_rate\": 0.08135516451954689, \"subsample\": 0.8227260001760656, \"colsample_bytree\": 0.7978924271047279, \"min_child_weight\": 4, \"reg_lambda\": 7.43491342881653, \"objective\": \"reg:squarederror\", \"tree_method\": \"gpu_hist\", \"n_jobs\": 2, \"early_stopping_rounds\": 40, \"gpu_id\": 0, \"predictor\": \"gpu_predictor\"}",
+        "fixed_horizon_rounds": "[230, 254, 268, 227, 171, 196, 235, 185, 258, 247, 254, 279, 297, 276, 298, 573, 391, 556, 288, 247, 288, 297, 377, 205, 203, 299, 116, 295, 243, 288, 353, 261, 232, 111, 291, 101, 140, 383, 271, 197, 344, 103, 197, 237, 111, 94, 154, 148, 132, 108, 153, 142, 109, 94, 104, 133, 150, 94, 328, 85]"
+      },
+      {
+        "space": "Intrinsic",
+        "selected_features": "[\"P_Solar[kW]\"]",
+        "forecast_input_raw_dependencies": "[\"P_Solar[kW]\"]",
+        "shared_preprocessing_dependencies": "Common cleaning/eligibility and corrected target also use meteorological inputs; Intrinsic is not a sensor-free end-to-end pipeline.",
+        "pre": 0,
+        "best_trial_zero_based": 35,
+        "validation_rmse_kw": 1.0187611902566294,
+        "input_shape": "[1, 1]",
+        "parameters": "{\"n_estimators\": 700, \"max_depth\": 2, \"learning_rate\": 0.03938249729325832, \"subsample\": 0.9727203848279559, \"colsample_bytree\": 0.7884733320190265, \"min_child_weight\": 2, \"reg_lambda\": 1.5057492187137775, \"objective\": \"reg:squarederror\", \"tree_method\": \"gpu_hist\", \"n_jobs\": 2, \"early_stopping_rounds\": 40, \"gpu_id\": 0, \"predictor\": \"gpu_predictor\"}",
+        "fixed_horizon_rounds": "[224, 621, 204, 166, 188, 204, 419, 298, 304, 309, 230, 184, 236, 284, 224, 221, 289, 301, 224, 236, 222, 213, 188, 212, 188, 223, 222, 318, 203, 190, 192, 205, 205, 197, 191, 191, 190, 221, 197, 200, 197, 192, 191, 220, 190, 190, 190, 200, 190, 218, 219, 258, 258, 211, 205, 257, 245, 238, 257, 200]"
+      }
+    ]
+  }
+}

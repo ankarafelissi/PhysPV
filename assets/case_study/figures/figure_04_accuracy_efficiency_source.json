@@ -1,0 +1,29 @@
+{
+  "caption": "Accuracy versus retraining cost. Diamond markers identify nondominated point estimates; dominance does not imply statistically significant superiority. Accuracy comes from predeclared repeat 1; training cost is the median of five identical fixed-seed isolated refits. Resource IQR and accuracy intervals are reported in tables; TPE search cost is separate.",
+  "data": [
+    {
+      "space": "Original",
+      "fit_time_s_median": 273.2448145,
+      "rmse_kw": 1.3954122940172329,
+      "nondominated": false
+    },
+    {
+      "space": "Expanded-Pearson",
+      "fit_time_s_median": 113.4637345,
+      "rmse_kw": 1.4152519228291214,
+      "nondominated": false
+    },
+    {
+      "space": "Expanded-Physics",
+      "fit_time_s_median": 50.3104663,
+      "rmse_kw": 1.3523199438012363,
+      "nondominated": true
+    },
+    {
+      "space": "Intrinsic",
+      "fit_time_s_median": 17.962508,
+      "rmse_kw": 1.531837806564032,
+      "nondominated": true
+    }
+  ]
+}

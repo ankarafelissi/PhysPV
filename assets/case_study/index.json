@@ -1,0 +1,111 @@
+{
+  "study_id": "20261112_044633_research_v2",
+  "source_manifest": "outputs/research_v2/experiments/manifest.json",
+  "source_commit": "16e6ac0767715c64c1e1f15ee36fb2881c420564",
+  "source_dirty": true,
+  "protocol": {
+    "version": 1,
+    "model": "XGBoost",
+    "train_start": "2018-06-01",
+    "folds": [
+      {
+        "fold": 1,
+        "test_start": "2019-01-01",
+        "test_end": "2019-03-01"
+      },
+      {
+        "fold": 2,
+        "test_start": "2019-03-01",
+        "test_end": "2019-05-01"
+      },
+      {
+        "fold": 3,
+        "test_start": "2019-05-01",
+        "test_end": "2019-07-01"
+      },
+      {
+        "fold": 4,
+        "test_start": "2019-07-01",
+        "test_end": "2019-09-01"
+      }
+    ],
+    "rounds": "Per-horizon initial TRAIN/VAL best_iteration + 1; no early stopping on refit.",
+    "features": "Initial TPE subsets frozen; Pearson screening is never repeated.",
+    "scalers": "Refit on each fold training histories and targets only.",
+    "primary_metric": "Arithmetic mean of 60 horizon RMSEs, kW, daylight target mask.",
+    "prediction_variant": "Raw inverse-scaled forecasts, matching the TPE objective.",
+    "normalization": "10 kW AC rating; nRMSE = 100 * mean_horizon_RMSE / 10.",
+    "fold_summary": "Equal-fold mean of mean-horizon RMSE; pooled RMSE reported separately.",
+    "primary_comparisons": [
+      [
+        "Intrinsic",
+        "Original"
+      ],
+      [
+        "Expanded-Pearson",
+        "Original"
+      ],
+      [
+        "Expanded-Physics",
+        "Original"
+      ]
+    ],
+    "secondary_comparisons": [
+      [
+        "Expanded-Physics",
+        "Expanded-Pearson"
+      ]
+    ],
+    "bootstrap": {
+      "method": "Paired moving calendar-day block bootstrap within each fold",
+      "resamples": 2000,
+      "seed": 2026,
+      "primary_days": 7,
+      "sensitivity_days": [
+        3,
+        14
+      ],
+      "confidence": 0.95,
+      "unit": "All horizons at an origin remain paired; missing days retained on calendar grid.",
+      "statistic": "Recompute each horizon RMSE, then mean horizons and equal-weight folds.",
+      "multiplicity": "Holm across three primary comparisons per declared endpoint; secondary exploratory."
+    },
+    "horizon_groups": {
+      "short": [
+        1,
+        12
+      ],
+      "medium": [
+        13,
+        36
+      ],
+      "long": [
+        37,
+        60
+      ]
+    },
+    "benchmark": {
+      "repeats": 5,
+      "fold": 1,
+      "seed": 11,
+      "warmup_requests": 10,
+      "requests": 200,
+      "origins": 20,
+      "scope": "Isolated full fixed-round TRAIN+VAL refits; batch-one 60-step inference."
+    },
+    "disclosure": "Initial partial VAL results were viewed before this protocol. No new TEST results used."
+  },
+  "scope": "Recorded tables and figures; full models/predictions remain in the local archive.",
+  "figures": [
+    "figure_01_workflow",
+    "figure_02_tpe_efficiency",
+    "figure_03_accuracy_horizons",
+    "figure_04_accuracy_efficiency",
+    "figure_05_temporal_robustness",
+    "figure_06_operational_tradeoff",
+    "figure_07_prediction_cases",
+    "figure_08_diurnal_errors",
+    "supp_figure_01_prediction_density",
+    "supp_figure_02_winner_complexity"
+  ]
+}

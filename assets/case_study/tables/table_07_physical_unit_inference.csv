@@ -1,0 +1,5 @@
+space,repeats,requests_per_repeat,scope,p50_ms_median,p50_ms_iqr,p95_ms_median,p95_ms_iqr
+Original,5,200,"Prepared unscaled feature window -> input scaling -> 60 GPU regressors -> inverse target scaling; excludes feature construction, acquisition and network.",769.858450000001,8.331649999995193,901.0829749999998,22.263245000006236
+Expanded-Pearson,5,200,"Prepared unscaled feature window -> input scaling -> 60 GPU regressors -> inverse target scaling; excludes feature construction, acquisition and network.",338.3828499999986,3.6852000000067164,537.4428549999998,11.869600000008518
+Expanded-Physics,5,200,"Prepared unscaled feature window -> input scaling -> 60 GPU regressors -> inverse target scaling; excludes feature construction, acquisition and network.",250.64934999999977,12.001599999997836,422.6123199999993,3.225230000003762
+Intrinsic,5,200,"Prepared unscaled feature window -> input scaling -> 60 GPU regressors -> inverse target scaling; excludes feature construction, acquisition and network.",205.24960000000016,0.9173000000020011,366.29313499999876,13.707235000002186
